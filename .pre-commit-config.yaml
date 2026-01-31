@@ -1,0 +1,10 @@
+repos:
+  - repo: https://github.com/charliermarsh/ruff-pre-commit
+    rev: v0.0.279
+    hooks:
+      - id: ruff
+        # Use Ruff to both format and fix unused imports. The `--fix` flag applies
+        # all safe autofixes (including formatting and F401). If you later want
+        # ruff to only check (not fix), remove the --fix arg.
+        args: ["--fix"]
+        language_version: python3
