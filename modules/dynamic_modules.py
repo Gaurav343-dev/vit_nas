@@ -134,7 +134,7 @@ class DynamicTransformerBlock(nn.Module):
         # TODO: which is first norm or add + attn -> norm? 
         # # based on Xiong et al. "On Layer Normalization in the Transformer Architecture" (https://arxiv.org/abs/2002.04745) 
         # we use pre-norm
-        x += self.mha(self.norm1(x))
+        x = x + self.mha(self.norm1(x))
         # TODO: pytorch implements dropout after attention; is that needed here?
-        x += self.mlp(self.norm2(x))
+        x = x + self.mlp(self.norm2(x))
         return x

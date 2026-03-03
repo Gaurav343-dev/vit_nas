@@ -47,3 +47,7 @@ class SuperNet(nn.Module):
         cls_output = x[:, 0]  # (B, embed_dim)
         logits = self.head(cls_output)  # (B, num_classes)
         return logits
+    
+    def set_active_subnet(self, config: dict):
+        # This method would set the active subnet configuration for all dynamic modules based on the provided config
+        pass

@@ -126,3 +126,5 @@ output*.json
 
 # profiling data
 archive/
+
+data/
