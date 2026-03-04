@@ -1,5 +1,6 @@
 import os
 from tqdm import tqdm
+import random
 
 import torch
 from torch import nn
@@ -15,34 +16,101 @@ import matplotlib.pyplot as plt
 from modules.super_net import SuperNet
 
 
-def train_one_epoch_sandwich(model, dataloader, optimizer, criterion, device):
+# interface for search space
+class SearchSpace:
+    def __init__(
+        self,
+        embed_dim_options: list,
+        num_heads_options: list,
+        mlp_dim_options: list,
+        num_layers_options: list,
+    ):
+        self.embed_dim_options = embed_dim_options
+        self.num_heads_options = num_heads_options
+        self.mlp_dim_options = mlp_dim_options
+        self.num_layers_options = num_layers_options
+
+    def get_max_config(self):
+        return {
+            "embed_dim": max(self.embed_dim_options),
+            "num_heads": max(self.num_heads_options),
+            "mlp_dim": max(self.mlp_dim_options),
+            "num_layers": max(self.num_layers_options),
+        }
+
+    def get_min_config(self):
+        return {
+            "embed_dim": min(self.embed_dim_options),
+            "num_heads": min(self.num_heads_options),
+            "mlp_dim": min(self.mlp_dim_options),
+            "num_layers": min(self.num_layers_options),
+        }
+
+    def sample_random_config(self):
+        return {
+            "embed_dim": random.choice(self.embed_dim_options),
+            "num_heads": random.choice(self.num_heads_options),
+            "mlp_dim": random.choice(self.mlp_dim_options),
+            "num_layers": random.choice(self.num_layers_options),
+        }
+
+
+def train_one_epoch_sandwich(
+    model,
+    dataloader,
+    optimizer,
+    criterion,
+    device,
+    search_space: SearchSpace,
+    num_random_subnets=2,
+):
     model.train()
     total_loss = 0.0
     train_accuracy = 0.0
     for inputs, targets in tqdm(dataloader, desc="Training"):
         inputs, targets = inputs.to(device), targets.to(device)
+        optimizer.zero_grad()
+
         # sandwich rule
         # 1. forward pass with full model and compute loss and backpropagate
-        optimizer.zero_grad()
+        # get max subnet config
+        max_config = search_space.get_max_config()
+        model.set_active_subnet(max_config)
         outputs = model(inputs)
         loss = criterion(outputs, targets)
         loss.backward()
-        # 2. forward pass with smallest model and compute loss and backpropagate
-        # 3. forward pass with randomly sampled sub-models and compute loss and backpropagate
-        # 4. take one single optimization step for all the above passes
-
-        optimizer.step()
-
+        # only keep track of max loss
         total_loss += loss.item()
         train_accuracy += (
             outputs.argmax(dim=1) == targets
         ).sum().item() / targets.size(0)
+
+        # 2. forward pass with smallest model and compute loss and backpropagate
+        min_config = search_space.get_min_config()
+        model.set_active_subnet(min_config)
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward()
+
+        # 3. forward pass with randomly sampled sub-models and compute loss and backpropagate
+        for _ in range(num_random_subnets):
+            random_config = search_space.sample_random_config()
+            if random_config == max_config or random_config == min_config:
+                continue  # skip if it matches max or min config
+            model.set_active_subnet(random_config)
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+
+        # 4. take one single optimization step for all the above passes
+        optimizer.step()
+
     average_loss = total_loss / len(dataloader)
     average_accuracy = train_accuracy / len(dataloader)
     return average_loss, average_accuracy
 
 
-def build_dataloader(batch_size=128, img_size=224, validation_split=None):
+def build_dataloader(batch_size=128, validation_split=None):
     # transform = create_transform(
     #     input_size=img_size,
     #     is_training=True,
@@ -140,20 +208,32 @@ def plot_training_curves(train_stats):
 
 
 if __name__ == "__main__":
+    # search space for NAS; these would be used
+    search_space = SearchSpace(
+        embed_dim_options=[512],
+        num_heads_options=[8],
+        mlp_dim_options=[512, 1024],
+        num_layers_options=[6],
+    )
+
+    max_config = search_space.get_max_config()
+    print(f"Max subnet config from search space: {max_config}")
     # get config from json fileTest Loss: {test_loss:.4f},
     config = {
         "img_size": 32,
         "patch_size": 4,
-        "embed_dim": 512,
-        "num_layers": 6,
-        "num_heads": 8,
-        "mlp_dim": 1024,
+        "embed_dim": max_config["embed_dim"],  # 512,
+        "num_layers": max_config["num_layers"],  # 6,
+        "num_heads": max_config["num_heads"],  # 8,
+        "mlp_dim": max_config["mlp_dim"],
         "num_classes": 10,
         "dropout": 0.1,
         "batch_size": 128,
-        "num_epochs": 10,
+        "num_epochs": 3,
         "learning_rate": 3e-4,
         "validation_split": 0.1,
+        "num_random_subnets": 2,  # number of random subnets to sample for each batch
+        "kd_ratio": 0.0,
     }
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -171,7 +251,6 @@ if __name__ == "__main__":
     model.to(device)
     train_loader, test_loader, val_loader = build_dataloader(
         batch_size=config["batch_size"],
-        img_size=config["img_size"],
         validation_split=config["validation_split"],
     )
     criterion = nn.CrossEntropyLoss()
@@ -189,7 +268,7 @@ if __name__ == "__main__":
     }
     for epoch in range(config["num_epochs"]):
         train_loss, train_accuracy = train_one_epoch_sandwich(
-            model, train_loader, optimizer, criterion, device
+            model, train_loader, optimizer, criterion, device, search_space
         )
         train_stats["train_loss"].append(train_loss)
         train_stats["train_accuracy"].append(train_accuracy)
@@ -200,13 +279,12 @@ if __name__ == "__main__":
             print(
                 f"Epoch {epoch + 1}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
             )
-        else:   
+        else:
             print(
                 f"Epoch {epoch + 1}: Train Loss: {train_loss:.4f}, Accuracy: {train_accuracy:.4f}"
             )
     test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
     print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
-
 
     # Save the final model
     save_model(model, "final_supernet.pth")
