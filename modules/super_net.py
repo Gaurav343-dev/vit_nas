@@ -32,6 +32,12 @@ class SuperNet(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
         self.head = nn.Linear(embed_dim, num_classes)
 
+        # search space for NAS
+        self.active_embed_dim = embed_dim
+        self.active_num_heads = num_heads
+        self.active_mlp_dim = mlp_dim
+        self.active_num_layers = num_layers
+
     def forward(self, x):
         B = x.size(0)
         x = self.patch_embed(x)  # (B, num_patches, embed_dim)
@@ -50,4 +56,23 @@ class SuperNet(nn.Module):
     
     def set_active_subnet(self, config: dict):
         # This method would set the active subnet configuration for all dynamic modules based on the provided config
-        pass
+        # config includes 
+        # - embed_dim
+        # - num_heads
+        # - mlp_dim
+        # - num_layers
+        self.active_embed_dim = config.get("embed_dim", self.active_embed_dim)
+        self.active_num_heads = config.get("num_heads", self.active_num_heads)
+        self.active_mlp_dim = config.get("mlp_dim", self.active_mlp_dim)
+        self.active_num_layers = config.get("num_layers", self.active_num_layers)
+
+        for block in self.transformer_blocks:
+            block.mha.active_embed_dim = self.active_embed_dim
+            block.mha.active_num_heads = self.active_num_heads
+            block.mha.qkv_linear.active_out = 3 * self.active_embed_dim
+            block.mha.proj_linear.active_out = self.active_embed_dim
+            
+            block.mlp.fc1.active_out = self.active_mlp_dim
+            block.mlp.fc2.active_out = self.active_embed_dim
+            block.norm1.active_features = self.active_embed_dim
+            block.norm2.active_features = self.active_embed_dim
