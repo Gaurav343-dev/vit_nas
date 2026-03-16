@@ -76,3 +76,10 @@ class SuperNet(nn.Module):
             block.mlp.fc2.active_out = self.active_embed_dim
             block.norm1.active_features = self.active_embed_dim
             block.norm2.active_features = self.active_embed_dim
+
+    # TODO: Complete get active subnet method that returns a nn.Module 
+    # with only the active subnet parameters and architecture. 
+    # This can be used for evaluation or export after NAS search is done.
+    def get_active_subnet(self):
+        pass 
+        # Placeholder for method to extract the active subnet as a standalone nn.Module

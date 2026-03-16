@@ -1,10 +1,15 @@
+from collections import defaultdict
 import os
 from tqdm import tqdm
 import random
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from timm import create_model
+from timm.utils.model import freeze
+from timm.loss.cross_entropy import SoftTargetCrossEntropy
 
 # from timm.data import create_transform
 from torchvision.datasets import CIFAR10
@@ -14,6 +19,7 @@ import matplotlib.pyplot as plt
 
 # internal imports
 from modules.super_net import SuperNet
+from utils.measurements import get_parameters_size
 
 
 # interface for search space
@@ -54,22 +60,76 @@ class SearchSpace:
             "num_layers": random.choice(self.num_layers_options),
         }
 
+    def set_training_dim(self, key, value):
+        if key == "embed_dim":
+            self.embed_dim_options = [value]
+        elif key == "num_heads":
+            self.num_heads_options = [value]
+        elif key == "mlp_dim":
+            self.mlp_dim_options = [value]
+        elif key == "num_layers":
+            self.num_layers_options = [value]
+        else:
+            raise ValueError(f"Invalid key: {key}")
+
+
+def train_one_epoch(model, dataloader, optimizer, criterion, device):
+    model.train()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    for inputs, targets in tqdm(dataloader, desc="Training"):
+        inputs, targets = inputs.to(device), targets.to(device)
+        inputs_224 = F.interpolate(
+            inputs, size=(224, 224), mode="bicubic", align_corners=False
+        )
+        optimizer.zero_grad()
+        outputs = model(inputs_224)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        _, predicted = torch.max(outputs.data, 1)
+        total += targets.size(0)
+        correct += (predicted == targets).sum().item()
+
+    average_loss = total_loss / len(dataloader)
+    accuracy = correct / total
+    return average_loss, accuracy
+
 
 def train_one_epoch_sandwich(
     model,
     dataloader,
     optimizer,
     criterion,
+    kd_criterion: SoftTargetCrossEntropy,
     device,
     search_space: SearchSpace,
     num_random_subnets=2,
+    teacher_model=None,
+    kd_ratio=0.0,
 ):
     model.train()
     total_loss = 0.0
     train_accuracy = 0.0
+
     for inputs, targets in tqdm(dataloader, desc="Training"):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
+
+        teacher_outputs = None
+        # get teacher outputs for distillation if teacher model is provided
+        if teacher_model is not None and kd_ratio > 0.0:
+            with torch.no_grad():
+                inputs_224 = F.interpolate(
+                    inputs, size=(224, 224), mode="bicubic", align_corners=False
+                )
+                teacher_logits = teacher_model(inputs_224)
+                # TODO: do you need softmax here ??
+                # convert teacher logits to soft labels
+                teacher_outputs = F.softmax(teacher_logits, dim=1)
 
         # sandwich rule
         # 1. forward pass with full model and compute loss and backpropagate
@@ -78,7 +138,18 @@ def train_one_epoch_sandwich(
         model.set_active_subnet(max_config)
         outputs = model(inputs)
         loss = criterion(outputs, targets)
+
+        if teacher_outputs is not None:
+            print("using teacher outputs for distillation with kd_ratio:", kd_ratio)
+            kd_loss = kd_criterion(outputs, teacher_outputs)
+            # nn.KLDivLoss()(
+            #     nn.LogSoftmax(dim=1)(outputs / 4),
+            #     nn.Softmax(dim=1)(teacher_outputs / 4),
+            # ) * (4 * 4)  # temperature scaling
+            loss = loss * (1 - kd_ratio) + kd_loss * kd_ratio
+
         loss.backward()
+        max_loss = loss
         # only keep track of max loss
         total_loss += loss.item()
         train_accuracy += (
@@ -89,28 +160,50 @@ def train_one_epoch_sandwich(
         min_config = search_space.get_min_config()
         model.set_active_subnet(min_config)
         outputs = model(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
+        min_loss = criterion(outputs, targets)
+        if teacher_outputs is not None:
+            kd_loss = kd_criterion(outputs, teacher_outputs)
+            # nn.KLDivLoss()(
+            #     nn.LogSoftmax(dim=1)(outputs / 4),
+            #     nn.Softmax(dim=1)(teacher_outputs / 4),
+            # ) * (4 * 4)  # temperature scaling
+            min_loss = min_loss * (1 - kd_ratio) + kd_loss * kd_ratio
+        min_loss.backward()
 
         # 3. forward pass with randomly sampled sub-models and compute loss and backpropagate
+        intermediate_loss = []
         for _ in range(num_random_subnets):
             random_config = search_space.sample_random_config()
-            if random_config == max_config or random_config == min_config:
+            if random_config == max_config:
+                intermediate_loss.append(max_loss.item())
+                continue
+            if random_config == min_config:
+                intermediate_loss.append(min_loss.item())
                 continue  # skip if it matches max or min config
             model.set_active_subnet(random_config)
             outputs = model(inputs)
             loss = criterion(outputs, targets)
+            if teacher_outputs is not None:
+                kd_loss = kd_criterion(outputs, teacher_outputs)
+                # nn.KLDivLoss()(
+                #     nn.LogSoftmax(dim=1)(outputs / 4),
+                #     nn.Softmax(dim=1)(teacher_outputs / 4),
+                # ) * (4 * 4)  # temperature scaling
+                loss = loss * (1 - kd_ratio) + kd_loss * kd_ratio
             loss.backward()
+            intermediate_loss.append(loss.item())
+
+        mean_intermediate_loss = sum(intermediate_loss) / len(intermediate_loss)
 
         # 4. take one single optimization step for all the above passes
         optimizer.step()
 
     average_loss = total_loss / len(dataloader)
     average_accuracy = train_accuracy / len(dataloader)
-    return average_loss, average_accuracy
+    return average_loss, average_accuracy, min_loss.item(), mean_intermediate_loss
 
 
-def build_dataloader(batch_size=128, validation_split=None):
+def build_dataloader(batch_size=128, img_size=32, validation_split=None):
     # transform = create_transform(
     #     input_size=img_size,
     #     is_training=True,
@@ -123,6 +216,7 @@ def build_dataloader(batch_size=128, validation_split=None):
     # )
     train_transform = transforms.Compose(
         [
+            transforms.Resize((img_size, img_size)),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(
@@ -132,6 +226,7 @@ def build_dataloader(batch_size=128, validation_split=None):
     )
     test_transform = transforms.Compose(
         [
+            transforms.Resize((img_size, img_size)),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]
@@ -188,6 +283,29 @@ def evaluate(model, dataloader, criterion, device):
     return average_loss, accuracy
 
 
+def evaluate_teacher(model, dataloader, criterion, device, img_size=224):
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for inputs, targets in tqdm(dataloader, desc="Evaluating"):
+            inputs, targets = inputs.to(device), targets.to(device)
+            inputs_224 = F.interpolate(
+                inputs, size=(img_size, img_size), mode="bicubic", align_corners=False
+            )
+            outputs = model(inputs_224)
+            loss = criterion(outputs, targets)
+            total_loss += loss.item()
+            _, predicted = torch.max(outputs.data, 1)
+            total += targets.size(0)
+            correct += (predicted == targets).sum().item()
+
+    average_loss = total_loss / len(dataloader)
+    accuracy = correct / total
+    return average_loss, accuracy
+
+
 def save_model(model, path):
     torch.save(model.state_dict(), path)
 
@@ -211,13 +329,12 @@ if __name__ == "__main__":
     # search space for NAS; these would be used
     search_space = SearchSpace(
         embed_dim_options=[512],
-        num_heads_options=[8],
-        mlp_dim_options=[512, 1024],
-        num_layers_options=[6],
+        num_heads_options=[2, 4, 8],
+        mlp_dim_options=[1024],  # [512, 1024],
+        num_layers_options=[6],  # [2, 4, 6],
     )
 
     max_config = search_space.get_max_config()
-    print(f"Max subnet config from search space: {max_config}")
     # get config from json fileTest Loss: {test_loss:.4f},
     config = {
         "img_size": 32,
@@ -229,14 +346,83 @@ if __name__ == "__main__":
         "num_classes": 10,
         "dropout": 0.1,
         "batch_size": 128,
-        "num_epochs": 3,
+        "num_epochs": 2,
         "learning_rate": 3e-4,
         "validation_split": 0.1,
         "num_random_subnets": 2,  # number of random subnets to sample for each batch
-        "kd_ratio": 0.0,
+        "kd_ratio": 0.5,  # weight for knowledge distillation loss (between 0 and 1)
+        "teacher_model_path": "teacher_model.pth",
+        "teacher_model_name": "vit_small_patch16_224",
+        "num_teacher_epochs": 1,
     }
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+    # load pretrained teacher model
+    teacher_model = create_model(
+        config["teacher_model_name"],
+        pretrained=True,
+        num_classes=config["num_classes"],
+    )
+    # freeze(teacher_model)
+    teacher_model.to(device)
+
+    # Train or load supernet model
+    if config["kd_ratio"] > 0.0:
+        print("Started learning for teacher model...")
+        if os.path.exists("teacher_model.pth"):
+            reload_model(teacher_model, "teacher_model.pth")
+        else:
+            # train the supernet model on the full config
+            train_loader, test_loader, val_loader = build_dataloader(
+                batch_size=config["batch_size"],
+                validation_split=config["validation_split"],
+                img_size=config["img_size"],
+            )
+            criterion = nn.CrossEntropyLoss()
+            optimizer = Adam(teacher_model.parameters(), lr=config["learning_rate"])
+
+            train_stats = {
+                "train_loss": [],
+                "train_accuracy": [],
+                "val_loss": [],
+                "val_accuracy": [],
+            }
+            for epoch in range(config["num_teacher_epochs"]):
+                train_loss, train_accuracy = train_one_epoch(
+                    teacher_model, train_loader, optimizer, criterion, device
+                )
+                train_stats["train_loss"].append(train_loss)
+                train_stats["train_accuracy"].append(train_accuracy)
+                if val_loader is not None:
+                    val_loss, val_accuracy = evaluate_teacher(
+                        teacher_model, val_loader, criterion, device
+                    )
+                    train_stats["val_loss"].append(val_loss)
+                    train_stats["val_accuracy"].append(val_accuracy)
+                    print(
+                        f"Epoch {epoch + 1}: Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, Val Loss: {val_loss:.4f}, Val Accuracy: {val_accuracy:.4f}"
+                    )
+                else:
+                    print(
+                        f"Epoch {epoch + 1}: Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}"
+                    )
+            test_loss, test_accuracy = evaluate_teacher(
+                teacher_model, test_loader, criterion, device, img_size=224
+            )
+            print(
+                f"Finetuned Teacher {config['teacher_model_name']} Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}"
+            )
+            save_model(teacher_model, "teacher_model.pth")
+            plot_training_curves(
+                {
+                    "Train Loss": train_stats["train_loss"],
+                    "Val Loss": train_stats["val_loss"],
+                }
+            )
+    # after training freeze the teacher model
+    freeze(teacher_model)
+
     model = SuperNet(
         img_size=config["img_size"],
         patch_size=config["patch_size"],
@@ -255,23 +441,33 @@ if __name__ == "__main__":
     )
     criterion = nn.CrossEntropyLoss()
     optimizer = Adam(model.parameters(), lr=config["learning_rate"])
+    kd_criterion = SoftTargetCrossEntropy()
 
     # train the model multiple steps for each design dimension
     # 1. train the full model for one epoch
     # Create an array of design directions to sample fromTest Loss: {test_loss:.4f},
     # for each design dimension, train the model with that specific design direction
-    train_stats = {
-        "train_loss": [],
-        "train_accuracy": [],
-        "val_loss": [],
-        "val_accuracy": [],
-    }
+    # let's train the model across mlp dimensions
+    # train_stats keeps track of losses across different design dimensions for plotting later
+    train_stats = defaultdict(list)
     for epoch in range(config["num_epochs"]):
-        train_loss, train_accuracy = train_one_epoch_sandwich(
-            model, train_loader, optimizer, criterion, device, search_space
+        train_loss, train_accuracy, min_loss, mean_intermediate_loss = (
+            train_one_epoch_sandwich(
+                model,
+                train_loader,
+                optimizer,
+                criterion,
+                kd_criterion,
+                device,
+                search_space,
+                teacher_model=teacher_model,
+                kd_ratio=config["kd_ratio"],
+            )
         )
         train_stats["train_loss"].append(train_loss)
         train_stats["train_accuracy"].append(train_accuracy)
+        train_stats["min_loss"].append(min_loss)
+        train_stats["mean_intermediate_loss"].append(mean_intermediate_loss)
         if val_loader is not None:
             val_loss, val_accuracy = evaluate(model, val_loader, criterion, device)
             train_stats["val_loss"].append(val_loss)
@@ -289,7 +485,20 @@ if __name__ == "__main__":
     # Save the final model
     save_model(model, "final_supernet.pth")
     plot_training_curves(
-        {"Train Loss": train_stats["train_loss"], "Val Loss": train_stats["val_loss"]}
+        {
+            "Train Loss": train_stats["train_loss"],
+            "Val Loss": train_stats["val_loss"],
+            "Min Loss": train_stats["min_loss"],
+            "Mean Intermediate Loss": train_stats["mean_intermediate_loss"],
+        }
+    )
+
+    # plot accuracy curves
+    plot_training_curves(
+        {
+            "Train Accuracy": train_stats["train_accuracy"],
+            "Val Accuracy": train_stats["val_accuracy"],
+        }
     )
 
     # TODO: add functionality to save intermediate checkpoints and reload from them for resuming training or for evaluation.

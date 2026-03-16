@@ -128,3 +128,9 @@ output*.json
 archive/
 
 data/
+
+# checkpoints and weights
+*.pth
+
+# playground notebooks
+playground.ipynb
