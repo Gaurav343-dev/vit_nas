@@ -9,20 +9,19 @@ from tqdm import tqdm
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from timm import create_model
 from timm.utils.model import freeze
-from timm.loss.cross_entropy import SoftTargetCrossEntropy
+from timm.loss.cross_entropy import SoftTargetCrossEntropy, LabelSmoothingCrossEntropy
 
 # from timm.data import create_transform
-from torchvision.datasets import CIFAR10
-from torchvision import transforms
 from torch.optim import Adam, AdamW
 import matplotlib.pyplot as plt
 
 # internal imports
 from modules.super_net import SuperNet
 from utils.measurements import get_parameters_size
+from utils.data_handler import build_dataloader
+from eval import evaluate, evaluate_teacher
 
 
 def set_seed(seed):
@@ -126,7 +125,7 @@ def train_one_epoch_sandwich(
     total_loss = 0.0
     train_accuracy = 0.0
 
-    for inputs, targets in tqdm(dataloader, desc="Training"):
+    for inputs, targets in tqdm(dataloader, desc="Sandwich Training"):
         inputs, targets = inputs.to(device), targets.to(device)
         optimizer.zero_grad()
 
@@ -140,7 +139,8 @@ def train_one_epoch_sandwich(
                 teacher_logits = teacher_model(inputs_224)
                 # TODO: do you need softmax here ??
                 # convert teacher logits to soft labels
-                teacher_outputs = F.softmax(teacher_logits, dim=1)
+                teacher_soft_outputs = F.softmax(teacher_logits, dim=1)
+                teacher_outputs = teacher_soft_outputs.detach()  # detach from computation graph
 
         # sandwich rule
         # 1. forward pass with full model and compute loss and backpropagate
@@ -213,109 +213,6 @@ def train_one_epoch_sandwich(
     return average_loss, average_accuracy, min_loss.item(), mean_intermediate_loss
 
 
-def build_dataloader(batch_size=128, img_size=32, validation_split=None):
-    # transform = create_transform(
-    #     input_size=img_size,
-    #     is_training=True,
-    #     color_jitter=0.4,
-    #     auto_augment='rand-m9-mstd0.5-inc1',
-    #     interpolation='bicubic',
-    #     re_prob=0.25,
-    #     re_mode='pixel',
-    #     re_count=1,
-    # )
-    train_transform = transforms.Compose(
-        [
-            transforms.Resize((img_size, img_size)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]
-            ),
-        ]
-    )
-    test_transform = transforms.Compose(
-        [
-            transforms.Resize((img_size, img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]
-            ),
-        ]
-    )
-
-    train_dataset = CIFAR10(
-        root="./data", train=True, download=True, transform=train_transform
-    )
-    val_loader = None
-    num_workers = max(0, (os.cpu_count() or 0) - 4)
-
-    if validation_split:
-        val_size = int(len(train_dataset) * validation_split)
-        train_size = len(train_dataset) - val_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            train_dataset, [train_size, val_size]
-        )
-        val_loader = DataLoader(
-            val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
-        )
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers
-    )
-
-    test_dataset = CIFAR10(
-        root="./data", train=False, download=True, transform=test_transform
-    )
-    test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
-    )
-
-    return train_loader, test_loader, val_loader
-
-
-def evaluate(model, dataloader, criterion, device):
-    model.eval()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for inputs, targets in tqdm(dataloader, desc="Evaluating"):
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            total_loss += loss.item()
-            _, predicted = torch.max(outputs.data, 1)
-            total += targets.size(0)
-            correct += (predicted == targets).sum().item()
-
-    average_loss = total_loss / len(dataloader)
-    accuracy = correct / total
-    return average_loss, accuracy
-
-
-def evaluate_teacher(model, dataloader, criterion, device, img_size=224):
-    model.eval()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for inputs, targets in tqdm(dataloader, desc="Evaluating"):
-            inputs, targets = inputs.to(device), targets.to(device)
-            inputs_224 = F.interpolate(
-                inputs, size=(img_size, img_size), mode="bicubic", align_corners=False
-            )
-            outputs = model(inputs_224)
-            loss = criterion(outputs, targets)
-            total_loss += loss.item()
-            _, predicted = torch.max(outputs.data, 1)
-            total += targets.size(0)
-            correct += (predicted == targets).sum().item()
-
-    average_loss = total_loss / len(dataloader)
-    accuracy = correct / total
-    return average_loss, accuracy
-
-
 def save_model(model, path):
     torch.save(model.state_dict(), path)
 
@@ -365,7 +262,7 @@ if __name__ == "__main__":
         "num_classes": 10,
         "dropout": 0.1,
         "batch_size": 128,
-        "num_epochs": 2,
+        "num_epochs": 1,
         "learning_rate": 3e-4,
         "warmup_lr": 1e-6,
         "warmup_epochs": 5,
@@ -374,6 +271,7 @@ if __name__ == "__main__":
         "kd_ratio": 0.5,  # weight for knowledge distillation loss (between 0 and 1)
         "teacher_model_path": "teacher_model.pth",
         "teacher_model_name": "vit_small_patch16_224",
+        "smoothing": 0.1,  # label smoothing factor for distillation loss
         "num_teacher_epochs": 1,
     }
 
@@ -475,7 +373,10 @@ if __name__ == "__main__":
         optimizer, T_max=config["num_epochs"]
     )
 
-    kd_criterion = SoftTargetCrossEntropy()
+    # kd_criterion = SoftTargetCrossEntropy()
+    # replace with label smoothing
+    kd_criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
+
 
     # train the model multiple steps for each design dimension
     # 1. train the full model for one epoch
