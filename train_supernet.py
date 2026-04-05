@@ -2,6 +2,7 @@ from collections import defaultdict
 import os
 import random
 import argparse
+import time
 
 import numpy as np
 from tqdm import tqdm
@@ -30,7 +31,6 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
-
 
 
 # interface for search space
@@ -153,7 +153,9 @@ def train_one_epoch_sandwich(
                 # TODO: do you need softmax here ??
                 # convert teacher logits to soft labels
                 teacher_soft_outputs = F.softmax(teacher_logits, dim=1)
-                teacher_outputs = teacher_soft_outputs.detach()  # detach from computation graph
+                teacher_outputs = (
+                    teacher_soft_outputs.detach()
+                )  # detach from computation graph
 
         # sandwich rule
         # 1. forward pass with full model and compute loss and backpropagate
@@ -252,12 +254,46 @@ def plot_training_curves(train_stats):
     plt.show()
 
 
+def name_model(prefix, config, epoch, accuracy):
+    time_stamp = time.strftime("%Y%m%d-%Hh")
+    return (
+        f"{prefix}_supernet_"
+        f"embed{config['embed_dim']}_"
+        f"heads{config['num_heads']}_"
+        f"mlp{config['mlp_dim']}_"
+        f"layers{config['num_layers']}"
+        f"_epoch{epoch}_acc{accuracy:.2f}_{time_stamp}.pth"
+    )
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train SuperNet based on ViT architecture")
-    parser.add_argument("--config", type=str, default="config.json", help="Path to config file")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--mixup", action="store_true", default=0.8, help="Whether to use Mixup data augmentation")
-    parser.add_argument("--cutmix", action="store_true", default=1.0, help="Whether to use CutMix data augmentation")
+    parser = argparse.ArgumentParser(
+        description="Train SuperNet based on ViT architecture"
+    )
+    parser.add_argument(
+        "--config", type=str, default="config.json", help="Path to config file"
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for reproducibility"
+    )
+    parser.add_argument(
+        "--mixup",
+        action="store_true",
+        default=0.8,
+        help="Whether to use Mixup data augmentation",
+    )
+    parser.add_argument(
+        "--cutmix",
+        action="store_true",
+        default=1.0,
+        help="Whether to use CutMix data augmentation",
+    )
+    parser.add_argument(
+        "--resume-path",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume training from",
+    )
 
     args = parser.parse_args()
 
@@ -390,6 +426,10 @@ if __name__ == "__main__":
         dropout=config["dropout"],
     )
 
+    if args.resume_path is not None:
+        print(f"Resuming student training from checkpoint: {args.resume_path}")
+        reload_model(model, args.resume_path)
+
     model.to(device)
     train_loader, test_loader, val_loader = build_dataloader(
         batch_size=config["batch_size"],
@@ -408,14 +448,17 @@ if __name__ == "__main__":
     kd_criterion = nn.KLDivLoss(reduction="batchmean")
     soft_target_criterion = SoftTargetCrossEntropy()
 
-
     # train the model multiple steps for each design dimension
     # 1. train the full model for one epoch
     # Create an array of design directions to sample fromTest Loss: {test_loss:.4f},
     # for each design dimension, train the model with that specific design direction
     # let's train the model across mlp dimensions
     # train_stats keeps track of losses across different design dimensions for plotting later
+
     train_stats = defaultdict(list)
+    best_val_acc = -1.0
+    best_epoch = -1
+
     for epoch in range(config["num_epochs"]):
         if epoch < warmup_epochs:
             warmup_lr = config["warmup_lr"]
@@ -453,6 +496,25 @@ if __name__ == "__main__":
                 Train Accuracy: {train_accuracy:.4f}, Val Loss: {val_loss:.4f}, \
                 Val Accuracy: {val_accuracy:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
             )
+
+            # save checkpoint if val accuracy is the best so far
+            if val_accuracy > best_val_acc:
+                best_val_acc = val_accuracy
+                best_epoch = epoch + 1
+                save_model(
+                    model,
+                    name_model(
+                        "best",
+                        {
+                            "embed_dim": search_space.get_max_config()["embed_dim"],
+                            "num_heads": search_space.get_max_config()["num_heads"],
+                            "mlp_dim": search_space.get_max_config()["mlp_dim"],
+                            "num_layers": search_space.get_max_config()["num_layers"],
+                        },
+                        best_epoch,
+                        best_val_acc,
+                    ),
+                )
         else:
             print(
                 f"Epoch {epoch + 1}: Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
@@ -465,7 +527,7 @@ if __name__ == "__main__":
     print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
 
     # Save the final model
-    save_model(model, "final_supernet.pth")
+    save_model(model, name_model("final", config, epoch=config["num_epochs"], accuracy=test_accuracy))
     plot_training_curves(
         {
             "Train Loss": train_stats["train_loss"],
