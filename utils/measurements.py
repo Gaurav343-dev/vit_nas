@@ -8,5 +8,8 @@ def get_parameters_size(model, unit="M"):
     else:
         return total_params
 
-def get_flops(model, input_size):
+def get_flops(model, input_size) -> float:
     pass  # Placeholder for FLOPs calculation, which can be complex and may require additional libraries like ptflops or fvcore.
+
+def get_peak_memory(model, input_size) -> float:
+    pass  # Placeholder for peak memory calculation, which can be complex and may require additional libraries or custom hooks to measure during a forward pass.
