@@ -278,7 +278,7 @@ class Predictor:
 
     @classmethod
     def load(cls, path: str, hidden_dim: int = 128) -> "Predictor":
-        ckpt = torch.load(path, map_location="cpu")
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
         model = PredictorMLP(input_dim=13, hidden_dim=hidden_dim)
         model.load_state_dict(ckpt["model_state"])
         model.eval()
