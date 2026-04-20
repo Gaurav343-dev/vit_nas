@@ -134,3 +134,5 @@ data/
 
 # playground notebooks
 playground.ipynb
+
+wandb/

@@ -296,6 +296,11 @@ if __name__ == "__main__":
         default=None,
         help="Path to checkpoint to resume training from",
     )
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        help="Enable logging to Weights & Biases",
+    )
 
     args = parser.parse_args()
 
@@ -334,6 +339,14 @@ if __name__ == "__main__":
         "smoothing": 0.1,  # label smoothing factor for distillation loss
         "num_teacher_epochs": 1,
     }
+
+    if args.use_wandb:
+        import wandb
+        wandb.init(
+            project="vit_nas_supernet",
+            config=config,
+            name=f"run_{time.strftime('%Y%m%d-%H%M%S')}"
+        )
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -493,6 +506,19 @@ if __name__ == "__main__":
             val_loss, val_accuracy = evaluate(model, val_loader, criterion, device)
             train_stats["val_loss"].append(val_loss)
             train_stats["val_accuracy"].append(val_accuracy)
+            
+            if args.use_wandb:
+                wandb.log({
+                    "epoch": epoch + 1,
+                    "train_loss": train_loss,
+                    "train_accuracy": train_accuracy,
+                    "min_loss": min_loss,
+                    "mean_intermediate_loss": mean_intermediate_loss,
+                    "val_loss": val_loss,
+                    "val_accuracy": val_accuracy,
+                    "lr": optimizer.param_groups[0]["lr"]
+                })
+
             print(
                 f"Epoch {epoch + 1}: Train Loss: {train_loss:.4f}, \
                 Train Accuracy: {train_accuracy:.4f}, Val Loss: {val_loss:.4f}, \
@@ -524,7 +550,22 @@ if __name__ == "__main__":
                     model,
                     save_pth,
                 )
+                
+                # Log the best model checkpoint as a wandb artifact
+                if args.use_wandb:
+                    best_artifact = wandb.Artifact(name=f"supernet-best-{wandb.run.id}", type="model")
+                    best_artifact.add_file(save_pth)
+                    wandb.log_artifact(best_artifact, aliases=["best", f"epoch-{best_epoch}"])
         else:
+            if args.use_wandb:
+                wandb.log({
+                    "epoch": epoch + 1,
+                    "train_loss": train_loss,
+                    "train_accuracy": train_accuracy,
+                    "min_loss": min_loss,
+                    "mean_intermediate_loss": mean_intermediate_loss,
+                    "lr": optimizer.param_groups[0]["lr"]
+                })
             print(
                 f"Epoch {epoch + 1}: Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
             )
@@ -533,10 +574,23 @@ if __name__ == "__main__":
             lr_scheduler.step()
 
     test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
+    if args.use_wandb:
+        wandb.log({
+            "test_loss": test_loss,
+            "test_accuracy": test_accuracy
+        })
+        wandb.finish()
     print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
 
     # Save the final model
-    save_model(model, name_model("final", config, epoch=config["num_epochs"], accuracy=test_accuracy))
+    final_model_path = name_model("final", config, epoch=config["num_epochs"], accuracy=test_accuracy)
+    save_model(model, final_model_path)
+    
+    # Log the final model checkpoint as a wandb artifact
+    if args.use_wandb:
+        final_artifact = wandb.Artifact(name=f"supernet-final-{wandb.run.id}", type="model")
+        final_artifact.add_file(final_model_path)
+        wandb.log_artifact(final_artifact, aliases=["final"])
     plot_training_curves(
         {
             "Train Loss": train_stats["train_loss"],
