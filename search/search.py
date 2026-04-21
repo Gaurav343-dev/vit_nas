@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from utils.measurements import get_flops, get_peak_memory
+from utils.measurements import get_macs, get_peak_memory
 
 class BaseSearch(ABC):
     def __init__(self, efficiency_predictor, accuracy_predictor):
@@ -28,11 +28,9 @@ class AnalyticalEfficiencyPredictor:
         subnet = self.net.get_active_subnet()
         if torch.cuda.is_available():
             subnet = subnet.cuda()
-        ############### YOUR CODE STARTS HERE ###############
-        # Hint: take a look at the `evaluate_sub_network` function above.
-        # Hint: the data shape is (batch_size, input_channel, image_size, image_size)
-        data_shape = (1, 3, image_size, image_size)
-        macs = get_flops(subnet, data_shape)
+        data_shape = (1, 3, self.net.img_size, self.net.img_size)  # Example input shape for ViT
+        macs = get_macs(subnet)
+        # TODO: implement get_peak_memory to get actual peak memory usage during a forward pass.
         peak_memory = get_peak_memory(subnet, data_shape)
         ################ YOUR CODE ENDS HERE ################
 
@@ -48,3 +46,5 @@ class AnalyticalEfficiencyPredictor:
                 return False
         # no constraint violated, return true.
         return True
+    
+# TODO: implement accuracy predictor

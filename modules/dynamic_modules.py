@@ -81,6 +81,9 @@ class DynamicMHA(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
         # scale by per-head dimension (head_dim) as in "Attention is All You Need"
         # which uses sqrt(d_k) where d_k is the key/query dimension for each head.
+        # TODO: BUG - self.head_dim is computed once from max dims at init.
+        # When active_num_heads != max_num_heads, this scale is incorrect.
+        # Fix: replace self.head_dim with (self.active_embed_dim // self.active_num_heads)
         attn = q @ k.transpose(-2, -1) * (self.head_dim**-0.5)
         attn = F.softmax(attn, dim=-1)
         # (B, num_heads, T, head_dim) -> (B, T, num_heads, head_dim) -> (B, T, E)

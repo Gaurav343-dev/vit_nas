@@ -1,18 +1,25 @@
 import torch
 from tqdm import tqdm
+from train_supernet import SearchSpace
+from modules.super_net import SuperNet
+
 
 class RandomSearcher:
-    def __init__(self, efficiency_predictor, accuracy_predictor):
+    def __init__(self, efficiency_predictor, accuracy_predictor, search_space: SearchSpace, model: SuperNet):
         self.efficiency_predictor = efficiency_predictor
         self.accuracy_predictor = accuracy_predictor
+        self.search_space = search_space
+        self.model = model
 
     def random_valid_sample(self, constraint):
         # randomly sample subnets until finding one that satisfies the constraint
         while True:
-            sample = self.accuracy_predictor.arch_encoder.random_sample_arch()
-            efficiency = self.efficiency_predictor.get_efficiency(sample)
+            # sample = self.accuracy_predictor.arch_encoder.random_sample_arch()
+            sample_config = self.search_space.sample_random_config()
+            self.model.set_active_subnet(sample_config)
+            efficiency = self.efficiency_predictor.get_efficiency(self.model)
             if self.efficiency_predictor.satisfy_constraint(efficiency, constraint):
-                return sample, efficiency
+                return self.model, efficiency
 
     def run_search(self, constraint, n_subnets=100):
         subnet_pool = []
