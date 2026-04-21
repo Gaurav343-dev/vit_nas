@@ -336,6 +336,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable logging to Weights & Biases",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="DataLoader worker count (default: auto = cpu_count - 4)",
+    )
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        default=None,
+        help="Number of training epochs (default: 200)",
+    )
 
     args = parser.parse_args()
 
@@ -362,7 +374,7 @@ if __name__ == "__main__":
         "num_classes": 10,
         "dropout": 0.1,
         "batch_size": 256,
-        "num_epochs": 200,
+        "num_epochs": args.num_epochs if args.num_epochs is not None else 200,
         "learning_rate": 8e-4,
         "warmup_lr": 1e-6,
         "warmup_epochs": 5,
@@ -408,6 +420,7 @@ if __name__ == "__main__":
             batch_size=config["batch_size"],
             validation_split=config["validation_split"],
             img_size=config["img_size"],
+            num_workers=args.num_workers,
         )
         criterion = nn.CrossEntropyLoss()
         if os.path.exists("teacher_model.pth"):
@@ -484,6 +497,7 @@ if __name__ == "__main__":
     train_loader, test_loader, val_loader = build_dataloader(
         batch_size=config["batch_size"],
         validation_split=config["validation_split"],
+        num_workers=args.num_workers,
     )
     criterion = nn.CrossEntropyLoss()
     optimizer = AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=0.05)
