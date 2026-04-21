@@ -18,6 +18,13 @@ class PatchEmbed(nn.Module):
         # output shape: (B, num_patches, max_embed_dim)
         return x
 
+    def get_macs(self) -> int:
+        """Conv2d with kernel=patch_size, stride=patch_size (non-overlapping).
+        MACs = C_in × C_out × H_out × W_out × K²
+        """
+        num_patches = (self.img_size // self.patch_size) ** 2
+        return 3 * self.max_embed_dim * num_patches * (self.patch_size ** 2)
+
 class SuperNet(nn.Module):
     def __init__(self, img_size=224, patch_size=16, embed_dim=768, num_layers=12, num_heads=12, mlp_dim=1024, num_classes=10, dropout=0.1):
         super().__init__()
@@ -83,3 +90,26 @@ class SuperNet(nn.Module):
     def get_active_subnet(self):
         pass 
         # Placeholder for method to extract the active subnet as a standalone nn.Module
+
+    def get_macs(self) -> int:
+        """Total MACs for the currently active subnet configuration.
+        Call set_active_subnet() first to configure the subnet before measuring.
+        Returns MACs (multiply-accumulate operations).
+        """
+        num_patches = (self.patch_embed.img_size // self.patch_embed.patch_size) ** 2
+        seq_len = num_patches + 1  # +1 for cls token
+
+        total = self.patch_embed.get_macs()
+
+        for i, block in enumerate(self.transformer_blocks):
+            if i >= self.active_num_layers:
+                break
+            total += block.get_macs(seq_len)
+
+        # Final LayerNorm (operates on all tokens, static nn.LayerNorm)
+        total += seq_len * self.active_embed_dim
+
+        # Classification head (CLS token only → 1 token)
+        total += self.active_embed_dim * self.head.out_features
+
+        return total
