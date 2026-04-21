@@ -8,20 +8,17 @@ def get_parameters_size(model, unit="M"):
     else:
         return total_params
 
-def get_macs(model, unit="M") -> str:
+def get_macs(model) -> int:
     """Return MACs for the model's currently active subnet.
     Call model.set_active_subnet(config) before this to measure a specific subnet.
 
     Args:
         model: SuperNet instance.
-        unit: "M" for MMACs, "G" for GMACs, or None for raw int.
+    Returns:        
+        MACs (multiply-accumulate operations) for the active subnet.
     """
     macs = model.get_macs()
-    if unit == "M":
-        return f"{macs / 1e6:.2f}M MACs"
-    elif unit == "G":
-        return f"{macs / 1e9:.3f}G MACs"
     return macs
 
 def get_peak_memory(model, input_size) -> float:
-    pass  # Placeholder for peak memory calculation, which can be complex and may require additional libraries or custom hooks to measure during a forward pass.
+    return 0  # Placeholder for peak memory calculation, which can be complex and may require additional libraries or custom hooks to measure during a forward pass.

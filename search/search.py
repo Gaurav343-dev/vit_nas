@@ -20,18 +20,16 @@ class BaseSearch(ABC):
         )
 
 class AnalyticalEfficiencyPredictor:
-    def __init__(self, net):
+    def __init__(self, net, img_size: int):
         self.net = net
+        self.img_size = img_size
 
-    def get_efficiency(self, spec: dict):
-        self.net.set_active_subnet(**spec)
-        subnet = self.net.get_active_subnet()
-        if torch.cuda.is_available():
-            subnet = subnet.cuda()
-        data_shape = (1, 3, self.net.img_size, self.net.img_size)  # Example input shape for ViT
-        macs = get_macs(subnet)
+    def get_efficiency(self, model):
+        # model has already had set_active_subnet() called on it before this
+        data_shape = (1, 3, self.img_size, self.img_size)
+        macs = get_macs(model)
         # TODO: implement get_peak_memory to get actual peak memory usage during a forward pass.
-        peak_memory = get_peak_memory(subnet, data_shape)
+        peak_memory = get_peak_memory(model, data_shape)
         ################ YOUR CODE ENDS HERE ################
 
         return dict(millionMACs=macs / 1e6, KBPeakMemory=peak_memory / 1024)
