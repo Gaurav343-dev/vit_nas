@@ -4,18 +4,23 @@ Usage:
     python run_search.py --checkpoint final_supernet.pth --mac-constraint 200 --n-subnets 100
 
 The script loads a trained supernet, runs random search under the given MACs
-constraint, and prints the best found config with its efficiency stats.
+constraint, extracts the best subnet as a static model, evaluates it on the
+CIFAR-10 test set, and prints the results.
 """
 import argparse
 import random
 
 import numpy as np
 import torch
+from torch import nn
 
+from eval import evaluate
 from modules.super_net import SuperNet
 from search.random_search import RandomSearcher
 from search.search import AnalyticalEfficiencyPredictor
 from train_supernet import SearchSpace
+from utils.data_handler import build_dataloader
+from utils.measurements import get_parameters_size
 
 
 def parse_args():
@@ -32,15 +37,16 @@ def parse_args():
     parser.add_argument("--dropout",     type=float, default=0.1)
 
     # search space options (subsets of the supernet's max dims)
-    parser.add_argument("--embed-dim-options", type=int, nargs="+", default=[256, 384, 512])
-    parser.add_argument("--num-heads-options", type=int, nargs="+", default=[2, 4, 8])
-    parser.add_argument("--mlp-dim-options",   type=int, nargs="+", default=[512, 1024])
+    parser.add_argument("--embed-dim-options",  type=int, nargs="+", default=[256, 384, 512])
+    parser.add_argument("--num-heads-options",  type=int, nargs="+", default=[2, 4, 8])
+    parser.add_argument("--mlp-dim-options",    type=int, nargs="+", default=[512, 1024])
     parser.add_argument("--num-layers-options", type=int, nargs="+", default=[2, 4, 6])
 
     # search settings
     parser.add_argument("--checkpoint",     type=str,   default=None, help="Path to supernet .pth checkpoint")
     parser.add_argument("--mac-constraint", type=float, default=200,  help="Max allowed MACs in millions")
     parser.add_argument("--n-subnets",      type=int,   default=100,  help="Number of subnets to sample")
+    parser.add_argument("--batch-size",     type=int,   default=128)
     parser.add_argument("--seed",           type=int,   default=42)
 
     return parser.parse_args()
@@ -103,6 +109,21 @@ def main():
     print("\n=== Best subnet found ===")
     print(f"  Config:     {best_config}")
     print(f"  MACs:       {best_efficiency['millionMACs']:.2f}M")
+
+    # extract static subnet with exactly the searched config's parameter count
+    model.set_active_subnet(best_config)
+    subnet = model.get_active_subnet().to(device)
+    print(f"  Params:     {get_parameters_size(subnet)}")
+
+    # evaluate subnet on CIFAR-10 test set
+    print("\nEvaluating subnet on CIFAR-10 test set...")
+    _, test_loader, _ = build_dataloader(batch_size=args.batch_size, img_size=args.img_size)
+    criterion = nn.CrossEntropyLoss()
+    test_loss, test_acc = evaluate(subnet, test_loader, criterion, device)
+
+    print(f"\n=== Test Results ===")
+    print(f"  Loss:       {test_loss:.4f}")
+    print(f"  Accuracy:   {test_acc * 100:.2f}%")
 
 
 if __name__ == "__main__":

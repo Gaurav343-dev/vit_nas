@@ -2,6 +2,7 @@
 import torch
 from torch import nn
 from .dynamic_modules import DynamicTransformerBlock
+from .sub_net import SubNet
 
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=224, patch_size=16, max_embed_dim=768):
@@ -84,12 +85,75 @@ class SuperNet(nn.Module):
             block.norm1.active_features = self.active_embed_dim
             block.norm2.active_features = self.active_embed_dim
 
-    # TODO: Complete get active subnet method that returns a nn.Module 
-    # with only the active subnet parameters and architecture. 
-    # This can be used for evaluation or export after NAS search is done.
-    def get_active_subnet(self):
-        pass 
-        # Placeholder for method to extract the active subnet as a standalone nn.Module
+    def get_active_subnet(self) -> SubNet:
+        """Extract the currently active subnet as a standalone static nn.Module.
+
+        Slices weights from the supernet's dynamic layers so the returned SubNet
+        has exactly the parameter count dictated by the active config.
+        Call set_active_subnet(config) before this method.
+        """
+        E = self.active_embed_dim
+        H = self.active_num_heads
+        M = self.active_mlp_dim
+        L = self.active_num_layers
+
+        subnet = SubNet(
+            img_size=self.patch_embed.img_size,
+            patch_size=self.patch_embed.patch_size,
+            embed_dim=E,
+            num_layers=L,
+            num_heads=H,
+            mlp_dim=M,
+            num_classes=self.head.out_features,
+            dropout=self.dropout.p,
+        )
+
+        # --- patch embedding (Conv2d) ---
+        subnet.patch_embed.weight.data.copy_(self.patch_embed.proj.weight[:E])
+        subnet.patch_embed.bias.data.copy_(self.patch_embed.proj.bias[:E])
+
+        # --- cls token and positional encoding ---
+        subnet.cls_token.data.copy_(self.cls_token[:, :, :E])
+        subnet.pos_encoding.data.copy_(self.pos_encoding[:, :, :E])
+
+        # --- transformer blocks ---
+        for i in range(L):
+            src = self.transformer_blocks[i]
+            dst = subnet.blocks[i]
+
+            # LayerNorm 1
+            dst.norm1.weight.data.copy_(src.norm1.layer_norm.weight[:E])
+            dst.norm1.bias.data.copy_(src.norm1.layer_norm.bias[:E])
+
+            # MHA — QKV projection
+            dst.mha.qkv.weight.data.copy_(src.mha.qkv_linear.linear.weight[:3*E, :E])
+            dst.mha.qkv.bias.data.copy_(src.mha.qkv_linear.linear.bias[:3*E])
+
+            # MHA — output projection
+            dst.mha.proj.weight.data.copy_(src.mha.proj_linear.linear.weight[:E, :E])
+            dst.mha.proj.bias.data.copy_(src.mha.proj_linear.linear.bias[:E])
+
+            # LayerNorm 2
+            dst.norm2.weight.data.copy_(src.norm2.layer_norm.weight[:E])
+            dst.norm2.bias.data.copy_(src.norm2.layer_norm.bias[:E])
+
+            # MLP fc1: embed_dim → mlp_dim
+            dst.mlp.fc1.weight.data.copy_(src.mlp.fc1.linear.weight[:M, :E])
+            dst.mlp.fc1.bias.data.copy_(src.mlp.fc1.linear.bias[:M])
+
+            # MLP fc2: mlp_dim → embed_dim
+            dst.mlp.fc2.weight.data.copy_(src.mlp.fc2.linear.weight[:E, :M])
+            dst.mlp.fc2.bias.data.copy_(src.mlp.fc2.linear.bias[:E])
+
+        # --- final LayerNorm ---
+        subnet.norm.weight.data.copy_(self.norm.weight[:E])
+        subnet.norm.bias.data.copy_(self.norm.bias[:E])
+
+        # --- classification head ---
+        subnet.head.weight.data.copy_(self.head.weight[:, :E])
+        subnet.head.bias.data.copy_(self.head.bias)
+
+        return subnet
 
     def get_macs(self) -> int:
         """Total MACs for the currently active subnet configuration.
