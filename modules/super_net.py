@@ -54,7 +54,9 @@ class SuperNet(nn.Module):
         x = x + self.pos_encoding[:, :x.size(1), :]  # Add positional encoding
         x = self.dropout(x)
 
-        for block in self.transformer_blocks:
+        for i, block in enumerate(self.transformer_blocks):
+            if i >= self.active_num_layers:
+                break
             x = block(x)
 
         x = self.norm(x)
@@ -63,27 +65,32 @@ class SuperNet(nn.Module):
         return logits
     
     def set_active_subnet(self, config: dict):
-        # This method would set the active subnet configuration for all dynamic modules based on the provided config
-        # config includes 
-        # - embed_dim
-        # - num_heads
-        # - mlp_dim
-        # - num_layers
+        # config includes:
+        # - embed_dim: int (global, consistent across all layers)
+        # - num_heads: list[int], one per active layer
+        # - mlp_dim:   list[int], one per active layer
+        # - num_layers: int
         self.active_embed_dim = config.get("embed_dim", self.active_embed_dim)
+        self.active_num_layers = config.get("num_layers", self.active_num_layers)
         self.active_num_heads = config.get("num_heads", self.active_num_heads)
         self.active_mlp_dim = config.get("mlp_dim", self.active_mlp_dim)
-        self.active_num_layers = config.get("num_layers", self.active_num_layers)
 
-        for block in self.transformer_blocks:
-            block.mha.active_embed_dim = self.active_embed_dim
-            block.mha.active_num_heads = self.active_num_heads
-            block.mha.qkv_linear.active_out = 3 * self.active_embed_dim
-            block.mha.proj_linear.active_out = self.active_embed_dim
-            
-            block.mlp.fc1.active_out = self.active_mlp_dim
-            block.mlp.fc2.active_out = self.active_embed_dim
-            block.norm1.active_features = self.active_embed_dim
-            block.norm2.active_features = self.active_embed_dim
+        E = self.active_embed_dim
+        # only configure the active layers; inactive blocks are skipped in forward()
+        for i in range(self.active_num_layers):
+            block = self.transformer_blocks[i]
+            H = self.active_num_heads[i]
+            M = self.active_mlp_dim[i]
+
+            block.mha.active_embed_dim = E
+            block.mha.active_num_heads = H
+            block.mha.qkv_linear.active_out = 3 * E
+            block.mha.proj_linear.active_out = E
+
+            block.mlp.fc1.active_out = M
+            block.mlp.fc2.active_out = E
+            block.norm1.active_features = E
+            block.norm2.active_features = E
 
     def get_active_subnet(self) -> SubNet:
         """Extract the currently active subnet as a standalone static nn.Module.
@@ -93,17 +100,17 @@ class SuperNet(nn.Module):
         Call set_active_subnet(config) before this method.
         """
         E = self.active_embed_dim
-        H = self.active_num_heads
-        M = self.active_mlp_dim
         L = self.active_num_layers
+        num_heads_list = self.active_num_heads  # list[int], length L
+        mlp_dim_list = self.active_mlp_dim      # list[int], length L
 
         subnet = SubNet(
             img_size=self.patch_embed.img_size,
             patch_size=self.patch_embed.patch_size,
             embed_dim=E,
             num_layers=L,
-            num_heads=H,
-            mlp_dim=M,
+            num_heads=num_heads_list,
+            mlp_dim=mlp_dim_list,
             num_classes=self.head.out_features,
             dropout=self.dropout.p,
         )
@@ -118,6 +125,7 @@ class SuperNet(nn.Module):
 
         # --- transformer blocks ---
         for i in range(L):
+            M = mlp_dim_list[i]
             src = self.transformer_blocks[i]
             dst = subnet.blocks[i]
 
@@ -137,11 +145,11 @@ class SuperNet(nn.Module):
             dst.norm2.weight.data.copy_(src.norm2.layer_norm.weight[:E])
             dst.norm2.bias.data.copy_(src.norm2.layer_norm.bias[:E])
 
-            # MLP fc1: embed_dim → mlp_dim
+            # MLP fc1: embed_dim → mlp_dim  (per-layer M)
             dst.mlp.fc1.weight.data.copy_(src.mlp.fc1.linear.weight[:M, :E])
             dst.mlp.fc1.bias.data.copy_(src.mlp.fc1.linear.bias[:M])
 
-            # MLP fc2: mlp_dim → embed_dim
+            # MLP fc2: mlp_dim → embed_dim  (per-layer M)
             dst.mlp.fc2.weight.data.copy_(src.mlp.fc2.linear.weight[:E, :M])
             dst.mlp.fc2.bias.data.copy_(src.mlp.fc2.linear.bias[:E])
 

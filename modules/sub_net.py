@@ -63,6 +63,11 @@ class SubNet(nn.Module):
 
     def __init__(self, img_size, patch_size, embed_dim, num_layers,
                  num_heads, mlp_dim, num_classes, dropout=0.0):
+        """
+        Args:
+            num_heads: list[int] of length num_layers — heads per block
+            mlp_dim:   list[int] of length num_layers — MLP hidden dim per block
+        """
         super().__init__()
         self.patch_size = patch_size
         self.embed_dim = embed_dim
@@ -76,8 +81,8 @@ class SubNet(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         self.blocks = nn.ModuleList([
-            StaticTransformerBlock(embed_dim, num_heads, mlp_dim, dropout=dropout)
-            for _ in range(num_layers)
+            StaticTransformerBlock(embed_dim, num_heads[i], mlp_dim[i], dropout=dropout)
+            for i in range(num_layers)
         ])
 
         self.norm = nn.LayerNorm(embed_dim)

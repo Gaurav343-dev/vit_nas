@@ -48,27 +48,30 @@ class SearchSpace:
         self.num_layers_options = num_layers_options
 
     def get_max_config(self):
+        L = max(self.num_layers_options)
         return {
             "embed_dim": max(self.embed_dim_options),
-            "num_heads": max(self.num_heads_options),
-            "mlp_dim": max(self.mlp_dim_options),
-            "num_layers": max(self.num_layers_options),
+            "num_heads": [max(self.num_heads_options)] * L,
+            "mlp_dim": [max(self.mlp_dim_options)] * L,
+            "num_layers": L,
         }
 
     def get_min_config(self):
+        L = min(self.num_layers_options)
         return {
             "embed_dim": min(self.embed_dim_options),
-            "num_heads": min(self.num_heads_options),
-            "mlp_dim": min(self.mlp_dim_options),
-            "num_layers": min(self.num_layers_options),
+            "num_heads": [min(self.num_heads_options)] * L,
+            "mlp_dim": [min(self.mlp_dim_options)] * L,
+            "num_layers": L,
         }
 
     def sample_random_config(self):
+        L = random.choice(self.num_layers_options)
         return {
             "embed_dim": random.choice(self.embed_dim_options),
-            "num_heads": random.choice(self.num_heads_options),
-            "mlp_dim": random.choice(self.mlp_dim_options),
-            "num_layers": random.choice(self.num_layers_options),
+            "num_heads": [random.choice(self.num_heads_options) for _ in range(L)],
+            "mlp_dim": [random.choice(self.mlp_dim_options) for _ in range(L)],
+            "num_layers": L,
         }
 
     def set_training_dim(self, key, value):
@@ -307,9 +310,9 @@ if __name__ == "__main__":
     # search space for NAS; these would be used
     search_space = SearchSpace(
         embed_dim_options=[512],
-        num_heads_options=[8],  # [2, 4, 8],
-        mlp_dim_options=[1024],  # [512, 1024],
-        num_layers_options=[6],  # [2, 4, 6],
+        num_heads_options=[2, 4, 8],
+        mlp_dim_options=[256, 512, 1024],
+        num_layers_options=[2, 4, 6],
     )
 
     # set random seed for reproducibility
