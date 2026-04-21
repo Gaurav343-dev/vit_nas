@@ -357,8 +357,8 @@ if __name__ == "__main__":
         "patch_size": 4,
         "embed_dim": max_config["embed_dim"],  # 512,
         "num_layers": max_config["num_layers"],  # 6,
-        "num_heads": max_config["num_heads"],  # 8,
-        "mlp_dim": max_config["mlp_dim"],
+        "num_heads": max(search_space.num_heads_options),  # scalar: supernet max architecture
+        "mlp_dim": max(search_space.mlp_dim_options),     # scalar: supernet max architecture
         "num_classes": 10,
         "dropout": 0.1,
         "batch_size": 256,
@@ -572,10 +572,10 @@ if __name__ == "__main__":
                     name_model(
                         "best",
                         {
-                            "embed_dim": search_space.get_max_config()["embed_dim"],
-                            "num_heads": search_space.get_max_config()["num_heads"],
-                            "mlp_dim": search_space.get_max_config()["mlp_dim"],
-                            "num_layers": search_space.get_max_config()["num_layers"],
+                            "embed_dim": max_config["embed_dim"],
+                            "num_heads": max(search_space.num_heads_options),
+                            "mlp_dim": max(search_space.mlp_dim_options),
+                            "num_layers": max_config["num_layers"],
                         },
                         best_epoch,
                         best_val_acc,
