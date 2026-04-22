@@ -313,7 +313,7 @@ def collect_predictor_dataset(
     all_configs = anchor_configs + random_configs
 
     for config in tqdm(all_configs, desc="Collecting predictor data"):
-        config_key = tuple(sorted(config.items()))
+        config_key = tuple(sorted((k, v if not isinstance(v, list) else v[0]) for k, v in config.items()))
         if config_key in seen_configs:
             continue
         seen_configs.add(config_key)
@@ -370,15 +370,15 @@ def main():
 
     max_config = search_space.get_max_config()
     model = SuperNet(
-        img_size=args.img_size,
-        patch_size=4,
-        embed_dim=max_config["embed_dim"],
-        num_layers=max_config["num_layers"],
-        num_heads=max_config["num_heads"],
-        mlp_dim=max_config["mlp_dim"],
-        num_classes=10,
-        dropout=0.0,  # disable dropout during evaluation
-    )
+    img_size=args.img_size,
+    patch_size=4,
+    embed_dim=512,
+    num_layers=6,
+    num_heads=8,
+    mlp_dim=1024,
+    num_classes=10,
+    dropout=0.0,
+)
     model.load_state_dict(torch.load(args.supernet_path, map_location=device))
     model.to(device)
 
