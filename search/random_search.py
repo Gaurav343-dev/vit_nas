@@ -34,8 +34,8 @@ class RandomSearcher:
             # TODO: wire up fully when accuracy predictor is implemented
             accs = self.accuracy_predictor.predict_acc([s[0] for s in subnet_pool])
             best_idx = torch.argmax(accs)
-            return subnet_pool[best_idx]
+            return subnet_pool[best_idx], subnet_pool
 
         # no accuracy predictor — return the most efficient (lowest MACs) valid config
         best_config, best_efficiency = min(subnet_pool, key=lambda x: x[1]["millionMACs"])
-        return best_config, best_efficiency
+        return (best_config, best_efficiency), subnet_pool

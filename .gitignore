@@ -136,3 +136,5 @@ data/
 playground.ipynb
 
 wandb/
+*.png
+results.json

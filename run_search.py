@@ -8,6 +8,7 @@ constraint, extracts the best subnet as a static model, evaluates it on the
 CIFAR-10 test set, and prints the results.
 """
 import argparse
+import json
 import random
 
 import numpy as np
@@ -37,7 +38,7 @@ def parse_args():
     parser.add_argument("--dropout",     type=float, default=0.1)
 
     # search space options (subsets of the supernet's max dims)
-    parser.add_argument("--embed-dim-options",  type=int, nargs="+", default=[256, 384, 512])
+    parser.add_argument("--embed-dim-options",  type=int, nargs="+", default=[512])
     parser.add_argument("--num-heads-options",  type=int, nargs="+", default=[2, 4, 8])
     parser.add_argument("--mlp-dim-options",    type=int, nargs="+", default=[512, 1024])
     parser.add_argument("--num-layers-options", type=int, nargs="+", default=[2, 4, 6])
@@ -48,6 +49,8 @@ def parse_args():
     parser.add_argument("--n-subnets",      type=int,   default=100,  help="Number of subnets to sample")
     parser.add_argument("--batch-size",     type=int,   default=128)
     parser.add_argument("--seed",           type=int,   default=42)
+    parser.add_argument("--results-json", type=str, default="results.json",
+                        help="Path to save all sampled subnet results (for Pareto plot)")
 
     return parser.parse_args()
 
@@ -104,7 +107,16 @@ def main():
     constraint = {"millionMACs": args.mac_constraint}
     print(f"\nRunning random search — constraint: {constraint}, n_subnets: {args.n_subnets}")
 
-    best_config, best_efficiency = searcher.run_search(constraint, n_subnets=args.n_subnets)
+    (best_config, best_efficiency), subnet_pool = searcher.run_search(constraint, n_subnets=args.n_subnets)
+
+    # save all sampled results to JSON for Pareto plot
+    records = [
+        {"millionMACs": eff["millionMACs"], "config": cfg}
+        for cfg, eff in subnet_pool
+    ]
+    with open(args.results_json, "w") as f:
+        json.dump(records, f, indent=2)
+    print(f"Saved {len(records)} subnet results → {args.results_json}")
 
     print("\n=== Best subnet found ===")
     print(f"  Config:     {best_config}")
@@ -124,6 +136,17 @@ def main():
     print(f"\n=== Test Results ===")
     print(f"  Loss:       {test_loss:.4f}")
     print(f"  Accuracy:   {test_acc * 100:.2f}%")
+
+    # add accuracy to results and re-save (best subnet accuracy now known)
+    records.append({
+        "millionMACs": best_efficiency["millionMACs"],
+        "accuracy": test_acc * 100,
+        "config": best_config,
+        "is_best": True,
+    })
+    with open(args.results_json, "w") as f:
+        json.dump(records, f, indent=2)
+    print(f"Updated results with best subnet accuracy → {args.results_json}")
 
 
 if __name__ == "__main__":
