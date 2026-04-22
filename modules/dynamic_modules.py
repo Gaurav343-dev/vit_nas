@@ -30,6 +30,10 @@ class DynamicLinear(nn.Module):
             x, weight.contiguous(), bias
         )  # contiguous for potential performance
 
+    def get_macs(self, seq_len: int, active_in: int) -> int:
+        """MACs = seq_len × active_out × active_in."""
+        return seq_len * self.active_out * active_in
+
 
 class DynamicLayerNorm(nn.Module):
     def __init__(self, max_in):
@@ -42,6 +46,10 @@ class DynamicLayerNorm(nn.Module):
         weight = self.layer_norm.weight[: self.active_features]
         bias = self.layer_norm.bias[: self.active_features]
         return F.layer_norm(x, (self.active_features,), weight, bias)
+
+    def get_macs(self, seq_len: int) -> int:
+        """LayerNorm: ~2 ops per element (scale + shift); variance/mean are small constants."""
+        return seq_len * self.active_features
 
 
 class DynamicMHA(nn.Module):
@@ -73,6 +81,9 @@ class DynamicMHA(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
         # scale by per-head dimension (head_dim) as in "Attention is All You Need"
         # which uses sqrt(d_k) where d_k is the key/query dimension for each head.
+        # TODO: BUG - self.head_dim is computed once from max dims at init.
+        # When active_num_heads != max_num_heads, this scale is incorrect.
+        # Fix: replace self.head_dim with (self.active_embed_dim // self.active_num_heads)
         attn = q @ k.transpose(-2, -1) * (self.head_dim**-0.5)
         attn = F.softmax(attn, dim=-1)
         # (B, num_heads, T, head_dim) -> (B, T, num_heads, head_dim) -> (B, T, E)
@@ -80,6 +91,22 @@ class DynamicMHA(nn.Module):
         x = (attn @ v).transpose(1, 2).reshape(batch_size, token_size, -1)
         x = self.proj_linear(x)
         return x
+
+    def get_macs(self, seq_len: int) -> int:
+        """
+        MACs for multi-head attention:
+          - QKV projection:  seq × E × 3E
+          - Q·Kᵀ scores:     seq² × E   (all heads combined, head_dim × num_heads = E)
+          - scores · V:      seq² × E
+          - Output proj:     seq × E × E
+        """
+        E = self.active_embed_dim
+        total = 0
+        total += self.qkv_linear.get_macs(seq_len, E)   # seq × E → seq × 3E
+        total += seq_len * seq_len * E                         # Q·Kᵀ
+        total += seq_len * seq_len * E                         # scores·V
+        total += self.proj_linear.get_macs(seq_len, E)  # seq × E → seq × E
+        return total
 
 
 class DynamicMlp(nn.Module):
@@ -113,6 +140,18 @@ class DynamicMlp(nn.Module):
         x = self.dropout(x)
         return x
 
+    def get_macs(self, seq_len: int) -> int:
+        """
+        MACs for MLP:
+          fc1: seq × embed_dim → seq × mlp_dim   (active_in inferred from fc2.active_out)
+          fc2: seq × mlp_dim   → seq × embed_dim
+        """
+        embed_dim = self.fc2.active_out  # set by set_active_subnet
+        mlp_dim = self.fc1.active_out    # set by set_active_subnet
+        total = self.fc1.get_macs(seq_len, embed_dim)
+        total += self.fc2.get_macs(seq_len, mlp_dim)
+        return total
+
 
 class DynamicTransformerBlock(nn.Module):
     def __init__(
@@ -138,3 +177,10 @@ class DynamicTransformerBlock(nn.Module):
         # TODO: pytorch implements dropout after attention; is that needed here?
         x = x + self.mlp(self.norm2(x))
         return x
+
+    def get_macs(self, seq_len: int) -> int:
+        total = self.norm1.get_macs(seq_len)
+        total += self.mha.get_macs(seq_len)
+        total += self.norm2.get_macs(seq_len)
+        total += self.mlp.get_macs(seq_len)
+        return total

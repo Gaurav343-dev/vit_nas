@@ -42,33 +42,68 @@ class SearchSpace:
         mlp_dim_options: list,
         num_layers_options: list,
     ):
+        assert len(embed_dim_options) > 0,  "embed_dim_options must not be empty"
+        assert len(num_heads_options) > 0,  "num_heads_options must not be empty"
+        assert len(mlp_dim_options) > 0,    "mlp_dim_options must not be empty"
+        assert len(num_layers_options) > 0, "num_layers_options must not be empty"
+        assert all(n > 0 for n in num_layers_options), \
+            "all num_layers_options must be positive integers"
+
         self.embed_dim_options = embed_dim_options
         self.num_heads_options = num_heads_options
         self.mlp_dim_options = mlp_dim_options
         self.num_layers_options = num_layers_options
 
+    def validate_config(self, config: dict):
+        """Raise AssertionError if config is inconsistent with the search space."""
+        L = config.get("num_layers")
+        E = config.get("embed_dim")
+        H = config.get("num_heads")
+        M = config.get("mlp_dim")
+
+        assert L is not None, "config must include 'num_layers'"
+        assert E is not None, "config must include 'embed_dim'"
+        assert H is not None, "config must include 'num_heads'"
+        assert M is not None, "config must include 'mlp_dim'"
+
+        assert L in self.num_layers_options, \
+            f"num_layers={L} not in num_layers_options={self.num_layers_options}"
+        assert E in self.embed_dim_options, \
+            f"embed_dim={E} not in embed_dim_options={self.embed_dim_options}"
+        assert isinstance(H, list) and len(H) == L, \
+            f"num_heads must be a list of length {L}, got {H!r}"
+        assert isinstance(M, list) and len(M) == L, \
+            f"mlp_dim must be a list of length {L}, got {M!r}"
+        assert all(h in self.num_heads_options for h in H), \
+            f"some num_heads values not in num_heads_options={self.num_heads_options}: {H}"
+        assert all(m in self.mlp_dim_options for m in M), \
+            f"some mlp_dim values not in mlp_dim_options={self.mlp_dim_options}: {M}"
+
     def get_max_config(self):
+        L = max(self.num_layers_options)
         return {
             "embed_dim": max(self.embed_dim_options),
-            "num_heads": max(self.num_heads_options),
-            "mlp_dim": max(self.mlp_dim_options),
-            "num_layers": max(self.num_layers_options),
+            "num_heads": [max(self.num_heads_options)] * L,
+            "mlp_dim": [max(self.mlp_dim_options)] * L,
+            "num_layers": L,
         }
 
     def get_min_config(self):
+        L = min(self.num_layers_options)
         return {
             "embed_dim": min(self.embed_dim_options),
-            "num_heads": min(self.num_heads_options),
-            "mlp_dim": min(self.mlp_dim_options),
-            "num_layers": min(self.num_layers_options),
+            "num_heads": [min(self.num_heads_options)] * L,
+            "mlp_dim": [min(self.mlp_dim_options)] * L,
+            "num_layers": L,
         }
 
     def sample_random_config(self):
+        L = random.choice(self.num_layers_options)
         return {
             "embed_dim": random.choice(self.embed_dim_options),
-            "num_heads": random.choice(self.num_heads_options),
-            "mlp_dim": random.choice(self.mlp_dim_options),
-            "num_layers": random.choice(self.num_layers_options),
+            "num_heads": [random.choice(self.num_heads_options) for _ in range(L)],
+            "mlp_dim": [random.choice(self.mlp_dim_options) for _ in range(L)],
+            "num_layers": L,
         }
 
     def set_training_dim(self, key, value):
@@ -251,6 +286,8 @@ def plot_training_curves(train_stats):
     plt.ylabel("Loss")
     plt.title("Training and Test Loss Curves")
     plt.legend()
+    time_stamp = time.strftime("%Y%m%d-%Hh")
+    plt.savefig(f"training_curves_{time_stamp}.png")
     plt.show()
 
 
@@ -294,6 +331,23 @@ if __name__ == "__main__":
         default=None,
         help="Path to checkpoint to resume training from",
     )
+    parser.add_argument(
+        "--use-wandb",
+        action="store_true",
+        help="Enable logging to Weights & Biases",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="DataLoader worker count (default: auto = cpu_count - 4)",
+    )
+    parser.add_argument(
+        "--num-epochs",
+        type=int,
+        default=None,
+        help="Number of training epochs (default: 200)",
+    )
 
     args = parser.parse_args()
 
@@ -301,8 +355,8 @@ if __name__ == "__main__":
     search_space = SearchSpace(
         embed_dim_options=[512],
         num_heads_options=[2, 4, 8],
-        mlp_dim_options=[1024],  # [512, 1024],
-        num_layers_options=[6],  # [2, 4, 6],
+        mlp_dim_options=[256, 512, 1024],
+        num_layers_options=[2, 4, 6],
     )
 
     # set random seed for reproducibility
@@ -315,23 +369,31 @@ if __name__ == "__main__":
         "patch_size": 4,
         "embed_dim": max_config["embed_dim"],  # 512,
         "num_layers": max_config["num_layers"],  # 6,
-        "num_heads": max_config["num_heads"],  # 8,
-        "mlp_dim": max_config["mlp_dim"],
+        "num_heads": max(search_space.num_heads_options),  # scalar: supernet max architecture
+        "mlp_dim": max(search_space.mlp_dim_options),     # scalar: supernet max architecture
         "num_classes": 10,
         "dropout": 0.1,
-        "batch_size": 128,
-        "num_epochs": 1,
-        "learning_rate": 3e-4,
+        "batch_size": 256,
+        "num_epochs": args.num_epochs if args.num_epochs is not None else 200,
+        "learning_rate": 8e-4,
         "warmup_lr": 1e-6,
         "warmup_epochs": 5,
         "validation_split": 0.1,
         "num_random_subnets": 2,  # number of random subnets to sample for each batch
-        "kd_ratio": 0.5,  # weight for knowledge distillation loss (between 0 and 1)
+        "kd_ratio": 0.0,  # weight for knowledge distillation loss (between 0 and 1)
         "teacher_model_path": "teacher_model.pth",
         "teacher_model_name": "vit_small_patch16_224",
         "smoothing": 0.1,  # label smoothing factor for distillation loss
         "num_teacher_epochs": 1,
     }
+
+    if args.use_wandb:
+        import wandb
+        wandb.init(
+            project="vit_nas_supernet",
+            config=config,
+            name=f"run_{time.strftime('%Y%m%d-%H%M%S')}"
+        )
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -358,6 +420,7 @@ if __name__ == "__main__":
             batch_size=config["batch_size"],
             validation_split=config["validation_split"],
             img_size=config["img_size"],
+            num_workers=args.num_workers,
         )
         criterion = nn.CrossEntropyLoss()
         if os.path.exists("teacher_model.pth"):
@@ -434,6 +497,7 @@ if __name__ == "__main__":
     train_loader, test_loader, val_loader = build_dataloader(
         batch_size=config["batch_size"],
         validation_split=config["validation_split"],
+        num_workers=args.num_workers,
     )
     criterion = nn.CrossEntropyLoss()
     optimizer = AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=0.05)
@@ -491,6 +555,19 @@ if __name__ == "__main__":
             val_loss, val_accuracy = evaluate(model, val_loader, criterion, device)
             train_stats["val_loss"].append(val_loss)
             train_stats["val_accuracy"].append(val_accuracy)
+            
+            if args.use_wandb:
+                wandb.log({
+                    "epoch": epoch + 1,
+                    "train_loss": train_loss,
+                    "train_accuracy": train_accuracy,
+                    "min_loss": min_loss,
+                    "mean_intermediate_loss": mean_intermediate_loss,
+                    "val_loss": val_loss,
+                    "val_accuracy": val_accuracy,
+                    "lr": optimizer.param_groups[0]["lr"]
+                })
+
             print(
                 f"Epoch {epoch + 1}: Train Loss: {train_loss:.4f}, \
                 Train Accuracy: {train_accuracy:.4f}, Val Loss: {val_loss:.4f}, \
@@ -501,21 +578,43 @@ if __name__ == "__main__":
             if val_accuracy > best_val_acc:
                 best_val_acc = val_accuracy
                 best_epoch = epoch + 1
-                save_model(
-                    model,
+                checkpoint_date = time.strftime("%Y%m%d-%Hh")
+                checkpoint_dir = f"models/checkpoint_{checkpoint_date}"
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                save_pth = os.path.join(
+                    checkpoint_dir,
                     name_model(
                         "best",
                         {
-                            "embed_dim": search_space.get_max_config()["embed_dim"],
-                            "num_heads": search_space.get_max_config()["num_heads"],
-                            "mlp_dim": search_space.get_max_config()["mlp_dim"],
-                            "num_layers": search_space.get_max_config()["num_layers"],
+                            "embed_dim": max_config["embed_dim"],
+                            "num_heads": max(search_space.num_heads_options),
+                            "mlp_dim": max(search_space.mlp_dim_options),
+                            "num_layers": max_config["num_layers"],
                         },
                         best_epoch,
                         best_val_acc,
                     ),
                 )
+                save_model(
+                    model,
+                    save_pth,
+                )
+                
+                # Log the best model checkpoint as a wandb artifact
+                if args.use_wandb:
+                    best_artifact = wandb.Artifact(name=f"supernet-best-{wandb.run.id}", type="model")
+                    best_artifact.add_file(save_pth)
+                    wandb.log_artifact(best_artifact, aliases=["best", f"epoch-{best_epoch}"])
         else:
+            if args.use_wandb:
+                wandb.log({
+                    "epoch": epoch + 1,
+                    "train_loss": train_loss,
+                    "train_accuracy": train_accuracy,
+                    "min_loss": min_loss,
+                    "mean_intermediate_loss": mean_intermediate_loss,
+                    "lr": optimizer.param_groups[0]["lr"]
+                })
             print(
                 f"Epoch {epoch + 1}: Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
             )
@@ -524,10 +623,23 @@ if __name__ == "__main__":
             lr_scheduler.step()
 
     test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
+    if args.use_wandb:
+        wandb.log({
+            "test_loss": test_loss,
+            "test_accuracy": test_accuracy
+        })
+        wandb.finish()
     print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}")
 
     # Save the final model
-    save_model(model, name_model("final", config, epoch=config["num_epochs"], accuracy=test_accuracy))
+    final_model_path = name_model("final", config, epoch=config["num_epochs"], accuracy=test_accuracy)
+    save_model(model, final_model_path)
+    
+    # Log the final model checkpoint as a wandb artifact
+    if args.use_wandb:
+        final_artifact = wandb.Artifact(name=f"supernet-final-{wandb.run.id}", type="model")
+        final_artifact.add_file(final_model_path)
+        wandb.log_artifact(final_artifact, aliases=["final"])
     plot_training_curves(
         {
             "Train Loss": train_stats["train_loss"],

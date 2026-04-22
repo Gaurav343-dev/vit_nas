@@ -134,3 +134,7 @@ data/
 
 # playground notebooks
 playground.ipynb
+
+wandb/
+*.png
+results.json
