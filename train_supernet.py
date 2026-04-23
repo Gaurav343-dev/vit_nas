@@ -79,6 +79,16 @@ class SearchSpace:
         assert all(m in self.mlp_dim_options for m in M), \
             f"some mlp_dim values not in mlp_dim_options={self.mlp_dim_options}: {M}"
 
+    @property
+    def size(self) -> int:
+        """Total number of distinct subnet configurations in the search space."""
+        n_h = len(self.num_heads_options)
+        n_m = len(self.mlp_dim_options)
+        n_e = len(self.embed_dim_options)
+        return n_e * sum(
+            (n_h ** L) * (n_m ** L) for L in self.num_layers_options
+        )
+
     def get_max_config(self):
         L = max(self.num_layers_options)
         return {
