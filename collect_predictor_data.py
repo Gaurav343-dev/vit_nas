@@ -30,9 +30,41 @@ from tqdm import tqdm
 
 from modules.super_net import SuperNet
 from utils.data_handler import build_dataloader
-from train_supernet import SearchSpace, set_seed
+from train_supernet import set_seed
 
+class SearchSpace:
+    def __init__(self, embed_dim_options, num_heads_options, mlp_dim_options, num_layers_options):
+        self.embed_dim_options = embed_dim_options
+        self.num_heads_options = num_heads_options
+        self.mlp_dim_options = mlp_dim_options
+        self.num_layers_options = num_layers_options
 
+    def get_max_config(self):
+        L = max(self.num_layers_options)
+        return {
+            "embed_dim": max(self.embed_dim_options),
+            "num_heads": [max(self.num_heads_options)] * L,
+            "mlp_dim": [max(self.mlp_dim_options)] * L,
+            "num_layers": L,
+        }
+
+    def get_min_config(self):
+        L = min(self.num_layers_options)
+        return {
+            "embed_dim": min(self.embed_dim_options),
+            "num_heads": [min(self.num_heads_options)] * L,
+            "mlp_dim": [min(self.mlp_dim_options)] * L,
+            "num_layers": L,
+        }
+
+    def sample_random_config(self):
+        L = random.choice(self.num_layers_options)
+        return {
+            "embed_dim": random.choice(self.embed_dim_options),
+            "num_heads": [random.choice(self.num_heads_options) for _ in range(L)],
+            "mlp_dim": [random.choice(self.mlp_dim_options) for _ in range(L)],
+            "num_layers": L,
+        }
 # ---------------------------------------------------------------------------
 # FLOPs / parameter counting
 # ---------------------------------------------------------------------------
@@ -40,16 +72,12 @@ from train_supernet import SearchSpace, set_seed
 def count_parameters(model: SuperNet) -> int:
     """Count active (non-masked) parameters based on active subnet config."""
     total = 0
-    cfg = {
-        "embed_dim": model.active_embed_dim,
-        "num_heads": model.active_num_heads,
-        "mlp_dim": model.active_mlp_dim,
-        "num_layers": model.active_num_layers,
-    }
-    E = cfg["embed_dim"]
-    H = cfg["num_heads"]
-    M = cfg["mlp_dim"]
-    L = cfg["num_layers"]
+    def unwrap(v):
+        return v[0] if isinstance(v, list) else v
+    E = unwrap(model.active_embed_dim)
+    H = unwrap(model.active_num_heads)
+    M = unwrap(model.active_mlp_dim)
+    L = unwrap(model.active_num_layers)
 
     # patch embed: Conv2d(3, E, patch_size, patch_size)
     patch_size = model.patch_embed.patch_size
@@ -82,14 +110,10 @@ def count_parameters(model: SuperNet) -> int:
 
 
 def count_flops(model: SuperNet, img_size: int = 32) -> int:
-    """
-    Approximate FLOPs for one forward pass with the active subnet config.
-    Uses the standard multiply-accumulate (MAC) convention where 1 MAC = 2 FLOPs.
-    """
-    E = model.active_embed_dim
-    H = model.active_num_heads
-    M = model.active_mlp_dim
-    L = model.active_num_layers
+    E = model.active_embed_dim[0] if isinstance(model.active_embed_dim, list) else model.active_embed_dim
+    H = model.active_num_heads[0] if isinstance(model.active_num_heads, list) else model.active_num_heads
+    M = model.active_mlp_dim[0] if isinstance(model.active_mlp_dim, list) else model.active_mlp_dim
+    L = model.active_num_layers[0] if isinstance(model.active_num_layers, list) else model.active_num_layers
     patch_size = model.patch_embed.patch_size
     T = (img_size // patch_size) ** 2 + 1  # sequence length incl. cls token
 
@@ -313,7 +337,7 @@ def collect_predictor_dataset(
     all_configs = anchor_configs + random_configs
 
     for config in tqdm(all_configs, desc="Collecting predictor data"):
-        config_key = tuple(sorted((k, v if not isinstance(v, list) else v[0]) for k, v in config.items()))
+        config_key = tuple(sorted((k, tuple(v) if isinstance(v, list) else v) for k, v in config.items()))
         if config_key in seen_configs:
             continue
         seen_configs.add(config_key)
@@ -364,8 +388,8 @@ def main():
     search_space = SearchSpace(
         embed_dim_options=[512],
         num_heads_options=[2, 4, 8],
-        mlp_dim_options=[1024],
-        num_layers_options=[6],
+        mlp_dim_options=[256, 512, 1024],
+        num_layers_options=[2, 4, 6],
     )
 
     max_config = search_space.get_max_config()

@@ -176,13 +176,7 @@ def search(
     configs += [search_space.sample_random_config() for _ in range(num_candidates - 2)]
 
     # deduplicate
-    seen = set()
-    unique_configs = []
-    for cfg in configs:
-        key = tuple(sorted(cfg.items()))
-        if key not in seen:
-            seen.add(key)
-            unique_configs.append(cfg)
+    unique_configs = configs
 
     print(f"Evaluating {len(unique_configs)} unique configs with predictor...")
 
@@ -271,10 +265,10 @@ def main():
     model = SuperNet(
         img_size=args.img_size,
         patch_size=4,
-        embed_dim=max_config["embed_dim"],
-        num_layers=max_config["num_layers"],
-        num_heads=max_config["num_heads"],
-        mlp_dim=max_config["mlp_dim"],
+        embed_dim=512,
+        num_layers=6,
+        num_heads=8,
+        mlp_dim=1024,
         num_classes=10,
         dropout=0.0,
     )

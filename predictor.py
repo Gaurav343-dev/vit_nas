@@ -37,23 +37,14 @@ from torch.utils.data import Dataset, DataLoader, random_split
 # ---------------------------------------------------------------------------
 
 def extract_features(record: dict) -> np.ndarray:
-    """
-    Flatten a dataset record into a 1D numpy feature vector.
-
-    Config features (4):
-        embed_dim, num_heads, mlp_dim, num_layers
-
-    Internal signal features (9):
-        activation_norm  (mean, std, max)
-        gradient_norm    (mean, std, max)
-        attention_entropy(mean, std, max)
-    """
     cfg = record["config"]
+    def unwrap(v):
+        return v[0] if isinstance(v, list) else v
     config_features = np.array([
-        cfg["embed_dim"],
-        cfg["num_heads"],
-        cfg["mlp_dim"],
-        cfg["num_layers"],
+        unwrap(cfg["embed_dim"]),
+        unwrap(cfg["num_heads"]),
+        unwrap(cfg["mlp_dim"]),
+        unwrap(cfg["num_layers"]),
     ], dtype=np.float32)
 
     sig = record["signals"]
