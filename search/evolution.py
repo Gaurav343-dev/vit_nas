@@ -1,126 +1,121 @@
 import copy
-import random
 import numpy as np
 from tqdm import tqdm
 
-class EvolutionSearcher:
-    def __init__(self, efficiency_predictor, accuracy_predictor, **kwargs):
-        self.efficiency_predictor = efficiency_predictor
-        self.accuracy_predictor = accuracy_predictor
+from modules.super_net import SuperNet
+from train_supernet import SearchSpace
 
-        # evolution hyper-parameters
-        self.arch_mutate_prob = kwargs.get("arch_mutate_prob", 0.1)
-        self.resolution_mutate_prob = kwargs.get("resolution_mutate_prob", 0.5)
-        self.population_size = kwargs.get("population_size", 100)
-        self.max_time_budget = kwargs.get("max_time_budget", 500)
-        self.parent_ratio = kwargs.get("parent_ratio", 0.25)
-        self.mutation_ratio = kwargs.get("mutation_ratio", 0.5)
+
+class EvolutionSearcher:
+    def __init__(self, efficiency_predictor, model: SuperNet, search_space: SearchSpace,
+                 accuracy_predictor=None, **kwargs):
+        self.efficiency_predictor = efficiency_predictor
+        self.accuracy_predictor = accuracy_predictor  # optional; –MACs used as proxy if absent
+        self.model = model
+        self.search_space = search_space
+
+        self.arch_mutate_prob = kwargs.get("arch_mutate_prob", 0.2)
+        self.population_size  = kwargs.get("population_size",  50)
+        self.max_time_budget  = kwargs.get("max_time_budget",  20)
+        self.parent_ratio     = kwargs.get("parent_ratio",     0.25)
+        self.mutation_ratio   = kwargs.get("mutation_ratio",   0.5)
 
     def update_hyper_params(self, new_param_dict):
         self.__dict__.update(new_param_dict)
 
-    def random_valid_sample(self, constraint):
-        # randomly sample subnets until finding one that satisfies the constraint
+    # ------------------------------------------------------------------
+    # internal helpers
+    # ------------------------------------------------------------------
+    def _get_efficiency(self, config: dict) -> dict:
+        self.model.set_active_subnet(config)
+        return self.efficiency_predictor.get_efficiency(self.model)
+
+    def _satisfies(self, config: dict, constraint: dict) -> tuple:
+        eff = self._get_efficiency(config)
+        return self.efficiency_predictor.satisfy_constraint(eff, constraint), eff
+
+    def _score_pool(self, configs: list) -> list:
+        """Score each config (higher = better).
+        Uses accuracy_predictor when available, otherwise –MACs as a proxy."""
+        if self.accuracy_predictor is not None:
+            return self.accuracy_predictor.predict_acc(configs)
+        return [-self._get_efficiency(cfg)["millionMACs"] for cfg in configs]
+
+    # ------------------------------------------------------------------
+    # sampling
+    # ------------------------------------------------------------------
+    def random_valid_sample(self, constraint: dict):
         while True:
-            sample = self.accuracy_predictor.arch_encoder.random_sample_arch()
-            efficiency = self.efficiency_predictor.get_efficiency(sample)
-            if self.efficiency_predictor.satisfy_constraint(efficiency, constraint):
-                return sample, efficiency
+            config = self.search_space.sample_random_config()
+            ok, eff = self._satisfies(config, constraint)
+            if ok:
+                return copy.deepcopy(config), eff
 
-    def mutate_sample(self, sample, constraint):
+    def mutate_sample(self, config: dict, constraint: dict):
         while True:
-            new_sample = copy.deepcopy(sample)
+            new_cfg = self.search_space.mutate_config(config, self.arch_mutate_prob)
+            ok, eff = self._satisfies(new_cfg, constraint)
+            if ok:
+                return new_cfg, eff
 
-            self.accuracy_predictor.arch_encoder.mutate_resolution(new_sample, self.resolution_mutate_prob)
-            self.accuracy_predictor.arch_encoder.mutate_width(new_sample, self.arch_mutate_prob)
-            self.accuracy_predictor.arch_encoder.mutate_arch(new_sample, self.arch_mutate_prob)
-
-            efficiency = self.efficiency_predictor.get_efficiency(new_sample)
-            if self.efficiency_predictor.satisfy_constraint(efficiency, constraint):
-                return new_sample, efficiency
-
-    def crossover_sample(self, sample1, sample2, constraint):
+    def crossover_sample(self, config1: dict, config2: dict, constraint: dict):
         while True:
-            new_sample = copy.deepcopy(sample1)
-            for key in new_sample.keys():
-                if not isinstance(new_sample[key], list):
-                    ############### YOUR CODE STARTS HERE ###############
-                    # hint: randomly choose the value from sample1[key] and sample2[key], random.choice
-                    new_sample[key] = random.choice([sample1[key], sample2[key]])
-                    ############### YOUR CODE ENDS HERE #################
-                else:
-                    for i in range(len(new_sample[key])):
-                        ############### YOUR CODE STARTS HERE ###############
-                        new_sample[key][i] = random.choice([sample1[key][i], sample2[key][i]])
-                        ############### YOUR CODE ENDS HERE #################
+            new_cfg = self.search_space.crossover_config(config1, config2)
+            ok, eff = self._satisfies(new_cfg, constraint)
+            if ok:
+                return new_cfg, eff
 
-            efficiency = self.efficiency_predictor.get_efficiency(new_sample)
-            if self.efficiency_predictor.satisfy_constraint(efficiency, constraint):
-                return new_sample, efficiency
-
-    def run_search(self, constraint, **kwargs):
+    # ------------------------------------------------------------------
+    # main search loop
+    # ------------------------------------------------------------------
+    def run_search(self, constraint: dict, **kwargs):
         self.update_hyper_params(kwargs)
 
         mutation_numbers = int(round(self.mutation_ratio * self.population_size))
-        parents_size = int(round(self.parent_ratio * self.population_size))
+        parents_size     = int(round(self.parent_ratio   * self.population_size))
 
-        best_valids = [-100]
-        population = []  # (acc, sample) tuples
+        best_valids = [-1e9]
+        best_info   = None       # (score, config)
+        population  = []         # list of (score, config)
+
+        # --- seed population ---
+        print(f"Seeding population ({self.population_size} subnets) …")
         child_pool = []
-        best_info = None
-        # generate random population
-        for _ in range(self.population_size):
-            sample, efficiency = self.random_valid_sample(constraint)
-            child_pool.append(sample)
+        for _ in tqdm(range(self.population_size)):
+            cfg, _ = self.random_valid_sample(constraint)
+            child_pool.append(cfg)
 
-        accs = self.accuracy_predictor.predict_acc(child_pool)
-        for i in range(self.population_size):
-            population.append((accs[i].item(), child_pool[i]))
+        scores = self._score_pool(child_pool)
+        population = list(zip(scores, child_pool))
 
-        # evolving the population
-        with tqdm(total=self.max_time_budget) as t:
-            for i in range(self.max_time_budget):
-                ############### YOUR CODE STARTS HERE ###############
-                # hint: sort the population according to the acc (descending order)
+        # --- evolutionary loop ---
+        with tqdm(total=self.max_time_budget, desc="Evolving") as t:
+            for _ in range(self.max_time_budget):
                 population = sorted(population, key=lambda x: x[0], reverse=True)
-                ############### YOUR CODE ENDS HERE #################
-
-                ############### YOUR CODE STARTS HERE ###############
-                # hint: keep topK samples in the population, K = parents_size
-                # the others are discarded.
                 population = population[:parents_size]
-                ############### YOUR CODE ENDS HERE #################
 
-                # update best info
-                acc = population[0][0]
-                if acc > best_valids[-1]:
-                    best_valids.append(acc)
+                best_score = population[0][0]
+                if best_score > best_valids[-1]:
+                    best_valids.append(best_score)
                     best_info = population[0]
                 else:
                     best_valids.append(best_valids[-1])
 
                 child_pool = []
-                for j in range(mutation_numbers):
-                    # randomly choose a sample
-                    par_sample = population[np.random.randint(parents_size)][1]
-                    # mutate this sample
-                    new_sample, efficiency = self.mutate_sample(par_sample, constraint)
-                    child_pool.append(new_sample)
+                for _ in range(mutation_numbers):
+                    par = population[np.random.randint(parents_size)][1]
+                    new_cfg, _ = self.mutate_sample(par, constraint)
+                    child_pool.append(new_cfg)
 
-                for j in range(self.population_size - mutation_numbers):
-                    # randomly choose two samples
-                    par_sample1 = population[np.random.randint(parents_size)][1]
-                    par_sample2 = population[np.random.randint(parents_size)][1]
-                    # crossover
-                    new_sample, efficiency = self.crossover_sample(
-                        par_sample1, par_sample2, constraint
-                    )
-                    child_pool.append(new_sample)
-                # predict accuracy with the accuracy predictor
-                accs = self.accuracy_predictor.predict_acc(child_pool)
-                for j in range(self.population_size):
-                    population.append((accs[j].item(), child_pool[j]))
+                for _ in range(self.population_size - mutation_numbers):
+                    p1 = population[np.random.randint(parents_size)][1]
+                    p2 = population[np.random.randint(parents_size)][1]
+                    new_cfg, _ = self.crossover_sample(p1, p2, constraint)
+                    child_pool.append(new_cfg)
+
+                scores = self._score_pool(child_pool)
+                population.extend(zip(scores, child_pool))
 
                 t.update(1)
 
-        return best_info
+        return best_info  # (score, best_config)

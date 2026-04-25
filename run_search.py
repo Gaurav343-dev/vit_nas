@@ -40,12 +40,13 @@ def parse_args():
     # search space options (subsets of the supernet's max dims)
     parser.add_argument("--embed-dim-options",  type=int, nargs="+", default=[512])
     parser.add_argument("--num-heads-options",  type=int, nargs="+", default=[2, 4, 8])
-    parser.add_argument("--mlp-dim-options",    type=int, nargs="+", default=[512, 1024])
+    parser.add_argument("--mlp-dim-options",    type=int, nargs="+", default=[256, 512, 1024])
     parser.add_argument("--num-layers-options", type=int, nargs="+", default=[2, 4, 6])
 
     # search settings
     parser.add_argument("--checkpoint",     type=str,   default=None, help="Path to supernet .pth checkpoint")
-    parser.add_argument("--mac-constraint", type=float, default=200,  help="Max allowed MACs in millions")
+    parser.add_argument("--mac-constraint",        type=float, default=None, help="Max allowed MACs in millions (omit to disable)")
+    parser.add_argument("--peak-memory-constraint", type=float, default=None, help="Max allowed peak activation memory in KB (omit to disable)")
     parser.add_argument("--n-subnets",      type=int,   default=100,  help="Number of subnets to sample")
     parser.add_argument("--batch-size",     type=int,   default=128)
     parser.add_argument("--seed",           type=int,   default=42)
@@ -104,7 +105,13 @@ def main():
     efficiency_predictor = AnalyticalEfficiencyPredictor(model, img_size=args.img_size)
     searcher = RandomSearcher(efficiency_predictor, search_space, model)
 
-    constraint = {"millionMACs": args.mac_constraint}
+    constraint = {}
+    if args.mac_constraint is not None:
+        constraint["millionMACs"] = args.mac_constraint
+    if args.peak_memory_constraint is not None:
+        constraint["KBPeakMemory"] = args.peak_memory_constraint
+
+    print(f"Search space size: {search_space.size:.1e}")
     print(f"\nRunning random search — constraint: {constraint}, n_subnets: {args.n_subnets}")
 
     (best_config, best_efficiency), subnet_pool = searcher.run_search(constraint, n_subnets=args.n_subnets)

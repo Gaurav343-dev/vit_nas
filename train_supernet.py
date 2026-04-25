@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 
 # internal imports
 from modules.super_net import SuperNet
+from search.search import SearchSpace
 from utils.measurements import get_parameters_size
 from utils.data_handler import build_dataloader
 from eval import evaluate, evaluate_teacher
@@ -32,91 +33,6 @@ def set_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
 
-
-# interface for search space
-class SearchSpace:
-    def __init__(
-        self,
-        embed_dim_options: list,
-        num_heads_options: list,
-        mlp_dim_options: list,
-        num_layers_options: list,
-    ):
-        assert len(embed_dim_options) > 0,  "embed_dim_options must not be empty"
-        assert len(num_heads_options) > 0,  "num_heads_options must not be empty"
-        assert len(mlp_dim_options) > 0,    "mlp_dim_options must not be empty"
-        assert len(num_layers_options) > 0, "num_layers_options must not be empty"
-        assert all(n > 0 for n in num_layers_options), \
-            "all num_layers_options must be positive integers"
-
-        self.embed_dim_options = embed_dim_options
-        self.num_heads_options = num_heads_options
-        self.mlp_dim_options = mlp_dim_options
-        self.num_layers_options = num_layers_options
-
-    def validate_config(self, config: dict):
-        """Raise AssertionError if config is inconsistent with the search space."""
-        L = config.get("num_layers")
-        E = config.get("embed_dim")
-        H = config.get("num_heads")
-        M = config.get("mlp_dim")
-
-        assert L is not None, "config must include 'num_layers'"
-        assert E is not None, "config must include 'embed_dim'"
-        assert H is not None, "config must include 'num_heads'"
-        assert M is not None, "config must include 'mlp_dim'"
-
-        assert L in self.num_layers_options, \
-            f"num_layers={L} not in num_layers_options={self.num_layers_options}"
-        assert E in self.embed_dim_options, \
-            f"embed_dim={E} not in embed_dim_options={self.embed_dim_options}"
-        assert isinstance(H, list) and len(H) == L, \
-            f"num_heads must be a list of length {L}, got {H!r}"
-        assert isinstance(M, list) and len(M) == L, \
-            f"mlp_dim must be a list of length {L}, got {M!r}"
-        assert all(h in self.num_heads_options for h in H), \
-            f"some num_heads values not in num_heads_options={self.num_heads_options}: {H}"
-        assert all(m in self.mlp_dim_options for m in M), \
-            f"some mlp_dim values not in mlp_dim_options={self.mlp_dim_options}: {M}"
-
-    def get_max_config(self):
-        L = max(self.num_layers_options)
-        return {
-            "embed_dim": max(self.embed_dim_options),
-            "num_heads": [max(self.num_heads_options)] * L,
-            "mlp_dim": [max(self.mlp_dim_options)] * L,
-            "num_layers": L,
-        }
-
-    def get_min_config(self):
-        L = min(self.num_layers_options)
-        return {
-            "embed_dim": min(self.embed_dim_options),
-            "num_heads": [min(self.num_heads_options)] * L,
-            "mlp_dim": [min(self.mlp_dim_options)] * L,
-            "num_layers": L,
-        }
-
-    def sample_random_config(self):
-        L = random.choice(self.num_layers_options)
-        return {
-            "embed_dim": random.choice(self.embed_dim_options),
-            "num_heads": [random.choice(self.num_heads_options) for _ in range(L)],
-            "mlp_dim": [random.choice(self.mlp_dim_options) for _ in range(L)],
-            "num_layers": L,
-        }
-
-    def set_training_dim(self, key, value):
-        if key == "embed_dim":
-            self.embed_dim_options = [value]
-        elif key == "num_heads":
-            self.num_heads_options = [value]
-        elif key == "mlp_dim":
-            self.mlp_dim_options = [value]
-        elif key == "num_layers":
-            self.num_layers_options = [value]
-        else:
-            raise ValueError(f"Invalid key: {key}")
 
 
 def train_one_epoch(model, dataloader, optimizer, criterion, device):
