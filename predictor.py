@@ -38,15 +38,24 @@ from torch.utils.data import Dataset, DataLoader, random_split
 
 def extract_features(record: dict) -> np.ndarray:
     cfg = record["config"]
-    def unwrap(v):
-        return v[0] if isinstance(v, list) else v
-    config_features = np.array([
-        unwrap(cfg["embed_dim"]),
-        unwrap(cfg["num_heads"]),
-        unwrap(cfg["mlp_dim"]),
-        unwrap(cfg["num_layers"]),
-    ], dtype=np.float32)
-
+    
+    embed_dim = float(cfg["embed_dim"][0] if isinstance(cfg["embed_dim"], list) else cfg["embed_dim"])
+    num_layers = float(cfg["num_layers"][0] if isinstance(cfg["num_layers"], list) else cfg["num_layers"])
+    
+    # per-layer features — pad to max 6 layers with zeros
+    max_layers = 6
+    num_heads = cfg["num_heads"] if isinstance(cfg["num_heads"], list) else [cfg["num_heads"]]
+    mlp_dim = cfg["mlp_dim"] if isinstance(cfg["mlp_dim"], list) else [cfg["mlp_dim"]]
+    
+    # pad to max_layers
+    num_heads_padded = num_heads + [0] * (max_layers - len(num_heads))
+    mlp_dim_padded = mlp_dim + [0] * (max_layers - len(mlp_dim))
+    
+    config_features = np.array(
+        [embed_dim, num_layers] + num_heads_padded + mlp_dim_padded,
+        dtype=np.float32
+    )  # shape: (14,)
+    
     sig = record["signals"]
     signal_features = np.array([
         sig["activation_norm"]["mean"],
@@ -60,7 +69,7 @@ def extract_features(record: dict) -> np.ndarray:
         sig["attention_entropy"]["max"],
     ], dtype=np.float32)
 
-    return np.concatenate([config_features, signal_features])  # shape: (13,)
+    return np.concatenate([config_features, signal_features])  # shape: (23,)
 
 
 def extract_targets(record: dict) -> np.ndarray:
@@ -111,11 +120,10 @@ class ArchDataset(Dataset):
         return self.features[idx], self.targets[idx]
 
     def denormalize_targets(self, targets: torch.Tensor) -> torch.Tensor:
-        """Convert normalized predictions back to original scale."""
         tgt_range = np.where(self.target_max - self.target_min == 0, 1,
-                             self.target_max - self.target_min)
-        scale = torch.tensor(tgt_range, dtype=torch.float32)
-        shift = torch.tensor(self.target_min, dtype=torch.float32)
+                            self.target_max - self.target_min)
+        scale = torch.tensor(tgt_range, dtype=torch.float32).to(targets.device)
+        shift = torch.tensor(self.target_min, dtype=torch.float32).to(targets.device)
         return targets * scale + shift
 
 
@@ -180,7 +188,7 @@ def train_predictor(
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size)
 
-    model = PredictorMLP(input_dim=13, hidden_dim=hidden_dim).to(device)
+    model = PredictorMLP(input_dim=23, hidden_dim=hidden_dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
@@ -248,7 +256,7 @@ class Predictor:
             self.dataset.feature_max - self.dataset.feature_min
         )
         x = (extract_features(record) - self.dataset.feature_min) / feat_range
-        x = torch.tensor(x, dtype=torch.float32).unsqueeze(0)
+        x = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(next(self.model.parameters()).device)
 
         with torch.no_grad():
             pred_norm = self.model(x)  # (1, 3) normalized
@@ -270,7 +278,7 @@ class Predictor:
     @classmethod
     def load(cls, path: str, hidden_dim: int = 128) -> "Predictor":
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
-        model = PredictorMLP(input_dim=13, hidden_dim=hidden_dim)
+        model = PredictorMLP(input_dim=23, hidden_dim=hidden_dim)
         model.load_state_dict(ckpt["model_state"])
         model.eval()
 

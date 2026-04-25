@@ -70,35 +70,32 @@ class SearchSpace:
 # ---------------------------------------------------------------------------
 
 def count_parameters(model: SuperNet) -> int:
-    """Count active (non-masked) parameters based on active subnet config."""
     total = 0
-    def unwrap(v):
-        return v[0] if isinstance(v, list) else v
-    E = unwrap(model.active_embed_dim)
-    H = unwrap(model.active_num_heads)
-    M = unwrap(model.active_mlp_dim)
-    L = unwrap(model.active_num_layers)
+    E = model.active_embed_dim[0] if isinstance(model.active_embed_dim, list) else model.active_embed_dim
+    L = model.active_num_layers[0] if isinstance(model.active_num_layers, list) else model.active_num_layers
+    num_heads = model.active_num_heads if isinstance(model.active_num_heads, list) else [model.active_num_heads] * L
+    mlp_dims = model.active_mlp_dim if isinstance(model.active_mlp_dim, list) else [model.active_mlp_dim] * L
 
     # patch embed: Conv2d(3, E, patch_size, patch_size)
     patch_size = model.patch_embed.patch_size
-    total += 3 * E * patch_size * patch_size + E  # weight + bias
+    total += 3 * E * patch_size * patch_size + E
 
     # cls token + pos encoding
     num_patches = (model.patch_embed.img_size // patch_size) ** 2
-    total += E  # cls token
-    total += (num_patches + 1) * E  # pos encoding
+    total += E
+    total += (num_patches + 1) * E
 
-    # transformer blocks (only active L blocks)
-    for _ in range(L):
-        # LayerNorm 1 & 2: weight + bias each
+    # transformer blocks — per layer using actual dims
+    for i in range(L):
+        M = mlp_dims[i]
+        # LayerNorm 1 & 2
         total += 4 * E
-        # QKV linear: (3E, E) + bias 3E
+        # QKV linear
         total += 3 * E * E + 3 * E
-        # proj linear: (E, E) + bias E
+        # proj linear
         total += E * E + E
-        # MLP fc1: (M, E) + bias M
+        # MLP fc1 and fc2
         total += M * E + M
-        # MLP fc2: (E, M) + bias E
         total += E * M + E
 
     # final norm
@@ -108,40 +105,29 @@ def count_parameters(model: SuperNet) -> int:
 
     return total
 
-
 def count_flops(model: SuperNet, img_size: int = 32) -> int:
     E = model.active_embed_dim[0] if isinstance(model.active_embed_dim, list) else model.active_embed_dim
-    H = model.active_num_heads[0] if isinstance(model.active_num_heads, list) else model.active_num_heads
-    M = model.active_mlp_dim[0] if isinstance(model.active_mlp_dim, list) else model.active_mlp_dim
     L = model.active_num_layers[0] if isinstance(model.active_num_layers, list) else model.active_num_layers
+    num_heads = model.active_num_heads if isinstance(model.active_num_heads, list) else [model.active_num_heads] * L
+    mlp_dims = model.active_mlp_dim if isinstance(model.active_mlp_dim, list) else [model.active_mlp_dim] * L
     patch_size = model.patch_embed.patch_size
-    T = (img_size // patch_size) ** 2 + 1  # sequence length incl. cls token
+    T = (img_size // patch_size) ** 2 + 1
 
-    flops = 0
+    flops = 2 * 3 * E * patch_size * patch_size * (img_size // patch_size) ** 2
 
-    # patch embed (Conv2d)
-    flops += 2 * 3 * E * patch_size * patch_size * (img_size // patch_size) ** 2
-
-    # transformer blocks
-    for _ in range(L):
-        # QKV projection: (T, E) x (E, 3E)
-        flops += 2 * T * E * 3 * E
-        # attention scores: (T, head_dim) x (head_dim, T) per head, H heads
+    for i in range(L):
+        H = num_heads[i]
+        M = mlp_dims[i]
         head_dim = E // H
+        flops += 2 * T * E * 3 * E
         flops += 2 * H * T * T * head_dim
-        # attention weighted sum: (T, T) x (T, head_dim) per head
         flops += 2 * H * T * T * head_dim
-        # output projection: (T, E) x (E, E)
         flops += 2 * T * E * E
-        # MLP: fc1 (T, E) x (E, M) + fc2 (T, M) x (M, E)
         flops += 2 * T * E * M + 2 * T * M * E
-        # LayerNorm x2 (approximated as 5 ops per element)
         flops += 2 * 5 * T * E
 
-    # final norm + head
     flops += 5 * T * E
     flops += 2 * E * model.head.out_features
-
     return flops
 
 
@@ -273,35 +259,126 @@ def evaluate_subnet_with_signals(
     device,
     max_batches: int = 5,
 ) -> tuple[float, dict]:
-    """
-    Run a small forward+backward pass to collect internal signals,
-    then evaluate accuracy on a slightly larger subset.
-    Returns (accuracy, signals_dict).
-    """
-    model.train()  # need gradients for backward pass
-    criterion = torch.nn.CrossEntropyLoss()
-
-    collector = InternalSignalCollector(model)
-
-    # one batch for signal collection (needs grad)
+    model.eval()
     inputs, targets = next(iter(val_loader))
     inputs, targets = inputs.to(device), targets.to(device)
-    outputs = model(inputs)
-    loss = criterion(outputs, targets)
-    loss.backward()
 
-    signals = collector.get_signals()
-    collector.remove_hooks()
+    activation_norms = []
+    attn_entropies = []
+    hooks = []
+    active_blocks = model.transformer_blocks[:model.active_num_layers]
 
-    # separate accuracy evaluation (no grad needed)
+    for block in active_blocks:
+        def make_act_hook(storage):
+            def hook(module, input, output):
+                storage.append(output.detach().norm(dim=-1).mean().item())
+            return hook
+        hooks.append(block.register_forward_hook(make_act_hook(activation_norms)))
+
+    with torch.no_grad():
+        model(inputs)
+
+    for h in hooks:
+        h.remove()
+
+    def stats(vals):
+        if not vals:
+            return {"mean": 0.0, "std": 0.0, "max": 0.0}
+        arr = np.array(vals)
+        return {"mean": float(arr.mean()), "std": float(arr.std()), "max": float(arr.max())}
+
+    signals = {
+        "activation_norm": stats(activation_norms),
+        "gradient_norm": {"mean": 0.0, "std": 0.0, "max": 0.0},
+        "attention_entropy": {"mean": 0.0, "std": 0.0, "max": 0.0},
+    }
+
     accuracy = evaluate_subnet(model, val_loader, device, max_batches=max_batches)
-
     return accuracy, signals
 
 
 # ---------------------------------------------------------------------------
 # Main data collection loop
 # ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def evaluate_subnet_preloaded(model, preloaded_batches, device):
+    model.eval()
+    correct = 0
+    total = 0
+    for inputs, targets in preloaded_batches:
+        outputs = model(inputs)
+        _, predicted = outputs.max(1)
+        correct += (predicted == targets).sum().item()
+        total += targets.size(0)
+    return correct / total if total > 0 else 0.0
+
+
+def evaluate_subnet_with_signals_preloaded(model, preloaded_batches, signal_batch, device):
+    model.train()  # need train mode for backward pass
+    criterion = torch.nn.CrossEntropyLoss()
+    
+    inputs, targets = signal_batch
+    
+    activation_norms = []
+    attn_entropies = []
+    gradient_norms = []
+    hooks = []
+    active_blocks = model.transformer_blocks[:model.active_num_layers]
+
+    for block in active_blocks:
+        def make_act_hook(storage):
+            def hook(module, input, output):
+                storage.append(output.detach().norm(dim=-1).mean().item())
+            return hook
+        hooks.append(block.register_forward_hook(make_act_hook(activation_norms)))
+
+        def make_attn_hook(storage):
+            def hook(module, input, output):
+                x = input[0].detach()
+                B, T, _ = x.shape
+                E = module.active_embed_dim
+                H = module.active_num_heads
+                head_dim = E // H
+                module.qkv_linear.active_out = 3 * E
+                qkv = module.qkv_linear(x)
+                qkv = qkv.reshape(B, T, 3, H, head_dim).permute(2, 0, 3, 1, 4)
+                q, k = qkv[0], qkv[1]
+                attn = F.softmax(q @ k.transpose(-2, -1) * (head_dim ** -0.5), dim=-1)
+                entropy = -(attn * (attn + 1e-9).log()).sum(dim=-1).mean().item()
+                storage.append(entropy)
+            return hook
+        hooks.append(block.mha.register_forward_hook(make_attn_hook(attn_entropies)))
+
+        def make_bwd_hook(storage):
+            def hook(module, grad_input, grad_output):
+                if grad_output[0] is not None:
+                    storage.append(grad_output[0].detach().norm(dim=-1).mean().item())
+            return hook
+        hooks.append(block.register_full_backward_hook(make_bwd_hook(gradient_norms)))
+
+    outputs = model(inputs)
+    loss = criterion(outputs, targets)
+    loss.backward()
+
+    for h in hooks:
+        h.remove()
+
+    def stats(vals):
+        if not vals:
+            return {"mean": 0.0, "std": 0.0, "max": 0.0}
+        arr = np.array(vals)
+        return {"mean": float(arr.mean()), "std": float(arr.std()), "max": float(arr.max())}
+
+    signals = {
+        "activation_norm":   stats(activation_norms),
+        "gradient_norm":     stats(gradient_norms),
+        "attention_entropy": stats(attn_entropies),
+    }
+
+    accuracy = evaluate_subnet_preloaded(model, preloaded_batches, device)
+    return accuracy, signals
+
 
 def collect_predictor_dataset(
     model: SuperNet,
@@ -312,26 +389,19 @@ def collect_predictor_dataset(
     max_eval_batches: int = 20,
     img_size: int = 32,
 ) -> list[dict]:
-    """
-    Sample `num_samples` configs, evaluate each subnet, return dataset.
-
-    Each record in the returned list is a dict:
-    {
-        "config":   {"embed_dim": int, "num_heads": int, "mlp_dim": int, "num_layers": int},
-        "accuracy": float,
-        "flops":    int,
-        "params":   int,
-        "signals":  {
-            "activation_norm":   {"mean", "std", "max"},
-            "gradient_norm":     {"mean", "std", "max"},
-            "attention_entropy": {"mean", "std", "max"},
-        }
-    }
-    """
     dataset = []
     seen_configs = set()
 
-    # always include max and min configs for anchoring the predictor
+    # preload validation batches into GPU memory once
+    print("Preloading validation data into memory...")
+    preloaded_batches = []
+    for i, (inputs, targets) in enumerate(val_loader):
+        if i >= max_eval_batches:
+            break
+        preloaded_batches.append((inputs.to(device), targets.to(device)))
+    signal_batch = preloaded_batches[0]
+    print(f"Preloaded {len(preloaded_batches)} batches ({len(preloaded_batches) * inputs.size(0)} images)")
+
     anchor_configs = [search_space.get_max_config(), search_space.get_min_config()]
     random_configs = [search_space.sample_random_config() for _ in range(num_samples)]
     all_configs = anchor_configs + random_configs
@@ -344,8 +414,8 @@ def collect_predictor_dataset(
 
         model.set_active_subnet(config)
 
-        accuracy, signals = evaluate_subnet_with_signals(
-            model, val_loader, device, max_batches=max_eval_batches
+        accuracy, signals = evaluate_subnet_with_signals_preloaded(
+            model, preloaded_batches, signal_batch, device
         )
         flops = count_flops(model, img_size=img_size)
         params = count_parameters(model)

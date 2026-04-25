@@ -2,7 +2,8 @@ import os
 import torch
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 def build_dataloader(
     batch_size=128,

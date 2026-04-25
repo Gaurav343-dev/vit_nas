@@ -154,58 +154,38 @@ def collect_signals_no_grad(
 # ---------------------------------------------------------------------------
 
 def search(
-    model: SuperNet,
     predictor: Predictor,
     search_space: SearchSpace,
-    val_loader,
-    device: torch.device,
     num_candidates: int = 2000,
     lambda_flops: float = 0.3,
     lambda_params: float = 0.2,
     top_k: int = 5,
 ) -> list[dict]:
-    """
-    Sample num_candidates configs, score each with the predictor and
-    cost function, return the top_k results sorted by cost (ascending).
-
-    Each result dict contains:
-        config, predicted_accuracy, predicted_flops, predicted_params, cost
-    """
-    # always include max and min configs
     configs = [search_space.get_max_config(), search_space.get_min_config()]
     configs += [search_space.sample_random_config() for _ in range(num_candidates - 2)]
 
-    # deduplicate
-    unique_configs = configs
+    print(f"Evaluating {len(configs)} configs with predictor...")
 
-    print(f"Evaluating {len(unique_configs)} unique configs with predictor...")
+    empty_signals = {
+        "activation_norm":   {"mean": 0.0, "std": 0.0, "max": 0.0},
+        "gradient_norm":     {"mean": 0.0, "std": 0.0, "max": 0.0},
+        "attention_entropy": {"mean": 0.0, "std": 0.0, "max": 0.0},
+    }
 
     results = []
-    for config in tqdm(unique_configs, desc="Searching"):
-        model.set_active_subnet(config)
-
-        # collect signals for this config
-        signals = collect_signals_no_grad(model, val_loader, device)
-
-        # build record for predictor
-        record = {"config": config, "signals": signals}
-
-        # predict with MLP
+    for config in tqdm(configs, desc="Searching"):
+        record = {"config": config, "signals": empty_signals}
         acc, flops, params = predictor.predict(record)
-
         results.append({
-            "config":              config,
-            "predicted_accuracy":  acc,
-            "predicted_flops":     flops,
-            "predicted_params":    params,
-            # cost computed after we know max_flops / max_params
+            "config": config,
+            "predicted_accuracy": acc,
+            "predicted_flops": flops,
+            "predicted_params": params,
         })
 
-    # normalize flops and params across all candidates
     max_flops  = max(r["predicted_flops"]  for r in results)
     max_params = max(r["predicted_params"] for r in results)
 
-    # score each candidate
     for r in results:
         r["cost"] = cost_function(
             accuracy=r["predicted_accuracy"],
@@ -217,7 +197,6 @@ def search(
             lambda_params=lambda_params,
         )
 
-    # sort by cost ascending (lower = better)
     results.sort(key=lambda r: r["cost"])
     return results[:top_k]
 
@@ -256,8 +235,8 @@ def main():
     search_space = SearchSpace(
         embed_dim_options=[512],
         num_heads_options=[2, 4, 8],
-        mlp_dim_options=[1024],
-        num_layers_options=[6],
+        mlp_dim_options=[256, 512, 1024],
+        num_layers_options=[2, 4, 6],
     )
 
     # load supernet
@@ -288,17 +267,13 @@ def main():
 
     # run search
     top_configs = search(
-        model=model,
         predictor=predictor,
         search_space=search_space,
-        val_loader=val_loader,
-        device=device,
         num_candidates=args.num_candidates,
         lambda_flops=args.lambda_flops,
         lambda_params=args.lambda_params,
         top_k=args.top_k,
     )
-
     # print results
     print(f"\nTop {args.top_k} architectures:")
     print("-" * 70)
